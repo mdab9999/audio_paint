@@ -158,3 +158,7 @@ in the window title, in the file properties of `audio_paint.exe` and in the inst
 sources (`cargo build --release`, `installeruild_installer.ps1`). Debug builds and editor
 checks reuse the current number, and a release build without changes keeps it. Commit
 `build_number.txt` together with the code it belongs to.
+
+## License
+
+MIT License, copyright (c) 2026 Maddin. See [LICENSE.txt](LICENSE.txt).

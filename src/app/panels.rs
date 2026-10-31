@@ -1167,7 +1167,7 @@ impl AudioPaintApp {
                 ui.heading(crate::APP_TITLE);
                 ui.label("Spectral audio viewer and editor in Rust.");
                 ui.label("Decoding: Symphonia · FFT: RustFFT · Playback: rodio · MP3: LAME");
-                ui.label("Copyright Maddin");
+                ui.label("Copyright (c) 2026 Maddin · MIT License");
             });
     }
 

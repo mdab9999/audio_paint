@@ -53,6 +53,7 @@ Name: "openwith"; Description: "{cm:OpenWith}"; GroupDescription: "{cm:FileTypes
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Audio Paint"; Filename: "{app}\audio_paint.exe"
