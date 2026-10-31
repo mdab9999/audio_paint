@@ -18,6 +18,9 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 - Mono mix or a single channel
 - Waveform lane and overview strip, all synchronised with the spectral view
 - Live cursor readout: time, frequency and level in dB
+- Time selection in the waveform, shown across all lanes and the overview
+- Playback of the whole file, the selection, or from the cursor, with a moving play cursor
+  that the view can follow
 - Analysis runs in the background on all CPU cores; zoomed-out views use a max-pooled
   pyramid so short transients stay visible
 
@@ -25,13 +28,20 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 
 | Action | Input |
 |---|---|
+| Select a time range | Drag in the waveform |
+| Resize the selection | Drag one of its edges |
+| Extend the selection | Shift + click or Shift + drag |
+| Deselect and set the cursor | Click in the waveform, or Esc / "Deselect" |
+| Select all | Double-click the waveform, Ctrl+A or "Select all" |
+| Play selection (or from cursor) / stop | Space, or "Play" / "Stop" |
+| Play the whole file | "Play all" |
 | Zoom time | Mouse wheel |
 | Zoom frequency | Ctrl + mouse wheel (or pinch) |
-| Pan time | Shift + wheel, drag, or arrow keys |
-| Pan frequency | Alt + wheel, or drag vertically |
+| Pan time | Shift + wheel, drag the spectrum, middle-drag, or arrow keys |
+| Pan frequency | Alt + wheel, or drag the spectrum vertically |
 | Zoom to a region | Right-drag a box |
 | Jump to a position | Click or drag in the overview strip |
-| Zoom to fit | Double-click, Home or F |
+| Zoom to fit | Double-click the spectrum, Home or F |
 | Zoom time in/out | + / - |
 
 ## Build and run

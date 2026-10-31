@@ -7,12 +7,13 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Key, PointerButton, Pos2, Rect, Response, Sense, Stroke,
-    StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
+    self, Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Response,
+    Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
 };
 
 use crate::audio::{self, AudioData};
 use crate::colormap::Colormap;
+use crate::player::Player;
 use crate::spectrum::{
     self, FFT_SIZES, Peaks, RenderParams, Spectrogram, WindowKind, freq_to_u, u_to_freq,
 };
@@ -25,6 +26,20 @@ const GAP: f32 = 6.0;
 const MIN_U_SPAN: f64 = 0.002;
 const WAVE_COLOR: Color32 = Color32::from_rgb(70, 220, 130);
 const AXIS_TEXT: Color32 = Color32::from_gray(190);
+const PLAY_COLOR: Color32 = Color32::from_rgb(255, 230, 80);
+const SELECTION_FILL: Color32 = Color32::from_rgba_premultiplied(40, 40, 40, 40);
+const SELECTION_EDGE: Color32 = Color32::from_rgba_premultiplied(170, 170, 170, 170);
+const CONTROLS_HELP: &str = "\
+Waveform: drag to select, drag an edge to resize, Shift+click to extend
+Waveform: click to set the cursor and deselect, double-click to select all
+Space: play / stop    Esc: deselect    Ctrl+A: select all
+Mouse wheel: zoom time    Ctrl+wheel: zoom frequency
+Shift+wheel: pan time    Alt+wheel: pan frequency
+Drag the spectrum or middle-drag: pan    Right-drag: zoom to box
+Overview: click or drag to jump    Double-click spectrum, Home or F: zoom to fit";
+
+/// Distance in points within which a drag grabs a selection edge.
+const EDGE_GRAB: f32 = 6.0;
 const AUDIO_EXTENSIONS: [&str; 7] = ["mp3", "wav", "flac", "ogg", "m4a", "aac", "mp4"];
 
 /// Settings that require re-running the FFT when changed.
@@ -136,6 +151,16 @@ pub struct AudioPaintApp {
     /// Start of a right-drag zoom box, and whether it started in the spectral lane.
     zoom_box: Option<(Pos2, bool)>,
     hover_info: Option<String>,
+
+    /// Selected time range in seconds (start < end).
+    selection: Option<(f64, f64)>,
+    /// Fixed end of the selection while it is being dragged.
+    selection_anchor: Option<f64>,
+    /// Insertion cursor: playback without a selection starts here.
+    playhead: f64,
+    player: Player,
+    /// Scroll the view to keep the play cursor visible.
+    follow_playback: bool,
 }
 
 impl AudioPaintApp {
@@ -158,6 +183,11 @@ impl AudioPaintApp {
             rendered: None,
             zoom_box: None,
             hover_info: None,
+            selection: None,
+            selection_anchor: None,
+            playhead: 0.0,
+            player: Player::default(),
+            follow_playback: true,
         };
         if let Some(path) = initial_file {
             app.open(path, &cc.egui_ctx);
@@ -253,6 +283,10 @@ impl AudioPaintApp {
                 peaks,
             } => {
                 self.view = View::full(audio.duration());
+                self.player.stop();
+                self.selection = None;
+                self.selection_anchor = None;
+                self.playhead = 0.0;
                 let name = file_name(&path);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                     "{name} - Audio Paint"
@@ -301,11 +335,119 @@ impl AudioPaintApp {
         }
     }
 
+    fn duration(&self) -> Option<f64> {
+        self.loaded.as_ref().map(|l| l.audio.duration())
+    }
+
+    fn play_range(&mut self, t0: f64, t1: f64) {
+        let Some(loaded) = &self.loaded else { return };
+        if let Err(e) = self.player.play(&loaded.audio, t0, t1) {
+            self.error = Some(e);
+        }
+    }
+
+    /// Plays the selection, or from the playhead to the end when nothing is selected.
+    fn play(&mut self) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        match self.selection {
+            Some((a, b)) => self.play_range(a, b),
+            None => {
+                // Restart from the beginning when the playhead sits at the very end.
+                let start = if self.playhead >= duration - 1e-3 {
+                    0.0
+                } else {
+                    self.playhead
+                };
+                self.play_range(start, duration);
+            }
+        }
+    }
+
+    fn play_all(&mut self) {
+        if let Some(duration) = self.duration() {
+            self.play_range(0.0, duration);
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        if self.player.is_playing() {
+            self.player.stop();
+        } else {
+            self.play();
+        }
+    }
+
+    fn select_all(&mut self) {
+        if let Some(duration) = self.duration() {
+            self.selection = Some((0.0, duration));
+            self.playhead = 0.0;
+        }
+    }
+
+    fn deselect(&mut self) {
+        if let Some((a, _)) = self.selection.take() {
+            self.playhead = a;
+        }
+        self.selection_anchor = None;
+    }
+
+    fn transport(&mut self, ui: &mut egui::Ui) {
+        let has_audio = self.loaded.is_some();
+        let playing = self.player.is_playing();
+        let play_label = if self.selection.is_some() {
+            "▶ Play selection"
+        } else {
+            "▶ Play"
+        };
+        if ui
+            .add_enabled(has_audio && !playing, egui::Button::new(play_label))
+            .on_hover_text("Play the selection, or from the cursor to the end (Space)")
+            .clicked()
+        {
+            self.play();
+        }
+        if ui
+            .add_enabled(has_audio && !playing, egui::Button::new("▶ Play all"))
+            .on_hover_text("Play the whole file from the start")
+            .clicked()
+        {
+            self.play_all();
+        }
+        if ui
+            .add_enabled(playing, egui::Button::new("■ Stop"))
+            .on_hover_text("Stop playback (Space)")
+            .clicked()
+        {
+            self.player.stop();
+        }
+        ui.checkbox(&mut self.follow_playback, "Follow")
+            .on_hover_text("Scroll the view to keep the play cursor visible");
+        ui.separator();
+        if ui
+            .add_enabled(has_audio, egui::Button::new("Select all"))
+            .on_hover_text("Select the whole file (Ctrl+A)")
+            .clicked()
+        {
+            self.select_all();
+        }
+        if ui
+            .add_enabled(self.selection.is_some(), egui::Button::new("Deselect"))
+            .on_hover_text("Clear the selection (Esc)")
+            .clicked()
+        {
+            self.deselect();
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             if ui.button("Open...").clicked() {
                 self.pick_file(ui.ctx());
             }
+            ui.separator();
+            self.transport(ui);
             ui.separator();
 
             ui.label("FFT size");
@@ -408,15 +550,30 @@ impl AudioPaintApp {
                     l.spec.bin_hz(),
                 ));
                 ui.separator();
+                let long = l.audio.duration() >= 60.0;
+                if let Some(pos) = self.player.position() {
+                    ui.colored_label(PLAY_COLOR, format!("▶ {}", format_time(pos, 0.001, long)));
+                } else {
+                    ui.label(format!(
+                        "Cursor {}",
+                        format_time(self.playhead, 0.001, long)
+                    ));
+                }
+                if let Some((a, b)) = self.selection {
+                    ui.label(format!(
+                        "Selection {} - {} ({})",
+                        format_time(a, 0.001, long),
+                        format_time(b, 0.001, long),
+                        format_time(b - a, 0.001, false),
+                    ));
+                }
+                ui.separator();
             }
             if let Some(info) = &self.hover_info {
                 ui.monospace(info);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(
-                    "Wheel: zoom time | Ctrl+wheel: zoom freq | Shift/Alt+wheel: pan | \
-                     Drag: pan | Right-drag: zoom box | Double-click: fit",
-                );
+                ui.weak("Controls (hover)").on_hover_text(CONTROLS_HELP);
             });
         });
     }
@@ -477,7 +634,17 @@ impl AudioPaintApp {
             self.handle_lane(ui, resp, rect, false, duration, nyq, &spec);
         }
         self.handle_overview(ui, &over_resp, overview_rect, duration);
-        self.handle_keys(ui);
+
+        let play_pos = self.player.position();
+        if let Some(p) = play_pos
+            && self.follow_playback
+            && (p > self.view.t1 || p < self.view.t0)
+        {
+            // Page forward like Audition: the play cursor restarts at the left edge.
+            let span = self.view.t_span();
+            self.view.t0 = p;
+            self.view.t1 = p + span;
+        }
         self.view.clamp(duration, 64.0 / sample_rate);
 
         // --- drawing -----------------------------------------------------------------------
@@ -491,7 +658,51 @@ impl AudioPaintApp {
         }
         draw_overview(&painter, overview_rect, self.view, duration, &peaks);
 
-        // Cursor line across the lanes.
+        // Selection, playhead and play cursor across all lanes.
+        let v = self.view;
+        let t_to_x = |r: Rect, t: f64| r.left() + ((t - v.t0) / v.t_span()) as f32 * r.width();
+        let ov_x = |t: f64| overview_rect.left() + (t / duration) as f32 * overview_rect.width();
+        let lanes = [Some(spec_rect), wave_rect];
+        if let Some((a, b)) = self.selection {
+            for (i, r) in lanes.iter().flatten().enumerate() {
+                let (x0, x1) = (t_to_x(*r, a).max(r.left()), t_to_x(*r, b).min(r.right()));
+                if x1 > x0 {
+                    // Lighter on the spectrum so its colours stay readable.
+                    let fill = if i == 0 {
+                        SELECTION_FILL.gamma_multiply(0.5)
+                    } else {
+                        SELECTION_FILL
+                    };
+                    painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, fill);
+                }
+                for x in [t_to_x(*r, a), t_to_x(*r, b)] {
+                    if r.x_range().contains(x) {
+                        painter.vline(x, r.y_range(), Stroke::new(1.0, SELECTION_EDGE));
+                    }
+                }
+            }
+            let ov = Rect::from_x_y_ranges(
+                ov_x(a)..=ov_x(b).max(ov_x(a) + 1.0),
+                overview_rect.y_range(),
+            );
+            painter.rect_filled(ov, 0.0, SELECTION_FILL);
+        }
+        let (cursor_t, cursor_stroke) = match play_pos {
+            Some(p) => (p, Stroke::new(1.5, PLAY_COLOR)),
+            None => (
+                self.playhead,
+                Stroke::new(1.0, PLAY_COLOR.gamma_multiply(0.6)),
+            ),
+        };
+        for r in lanes.iter().flatten() {
+            let x = t_to_x(*r, cursor_t);
+            if r.x_range().contains(x) {
+                painter.vline(x, r.y_range(), cursor_stroke);
+            }
+        }
+        painter.vline(ov_x(cursor_t), overview_rect.y_range(), cursor_stroke);
+
+        // Hover line across the lanes.
         let hover = [Some(&spec_resp), wave_resp.as_ref()]
             .into_iter()
             .flatten()
@@ -579,7 +790,14 @@ impl AudioPaintApp {
             }
         }
 
-        if resp.dragged_by(PointerButton::Primary) {
+        if !is_spec {
+            self.handle_selection(ui, resp, rect, duration);
+        }
+
+        // The spectrum pans with the left button; both lanes pan with the middle button.
+        if (is_spec && resp.dragged_by(PointerButton::Primary))
+            || resp.dragged_by(PointerButton::Middle)
+        {
             let d = resp.drag_delta();
             let dt = -(d.x / rect.width()) as f64 * v.t_span();
             self.view.t0 += dt;
@@ -612,8 +830,93 @@ impl AudioPaintApp {
             }
         }
 
-        if resp.double_clicked() {
+        if is_spec && resp.double_clicked() {
             self.view = View::full(duration);
+        }
+    }
+
+    /// Waveform lane: drag selects a time range, dragging near an edge resizes it,
+    /// Shift+click extends it, a plain click deselects and moves the playhead,
+    /// double-click selects everything.
+    fn handle_selection(&mut self, ui: &egui::Ui, resp: &Response, rect: Rect, duration: f64) {
+        let v = self.view;
+        let x_to_t = |x: f32| {
+            (v.t0 + ((x - rect.left()) / rect.width()) as f64 * v.t_span()).clamp(0.0, duration)
+        };
+        let t_to_x = |t: f64| rect.left() + ((t - v.t0) / v.t_span()) as f32 * rect.width();
+        let near_edge = |x: f32| {
+            self.selection.and_then(|(a, b)| {
+                if (x - t_to_x(a)).abs() <= EDGE_GRAB {
+                    Some(b) // grabbing the start keeps the end fixed
+                } else if (x - t_to_x(b)).abs() <= EDGE_GRAB {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some(pos) = resp.hover_pos()
+            && near_edge(pos.x).is_some()
+        {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+
+        let shift = ui.input(|i| i.modifiers.shift);
+        if resp.drag_started_by(PointerButton::Primary)
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        {
+            let t = x_to_t(origin.x);
+            self.selection_anchor = Some(match (near_edge(origin.x), self.selection) {
+                (Some(fixed), _) => fixed,
+                // Shift+drag extends from the farther selection edge.
+                (None, Some((a, b))) if shift => {
+                    if (t - a).abs() > (t - b).abs() {
+                        a
+                    } else {
+                        b
+                    }
+                }
+                _ => t,
+            });
+        }
+        if resp.dragged_by(PointerButton::Primary)
+            && let (Some(anchor), Some(pos)) = (self.selection_anchor, resp.interact_pointer_pos())
+        {
+            let t = x_to_t(pos.x);
+            self.selection = Some((anchor.min(t), anchor.max(t)));
+            self.playhead = anchor.min(t);
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        if resp.drag_stopped_by(PointerButton::Primary) {
+            self.selection_anchor = None;
+            if let Some((a, b)) = self.selection
+                && t_to_x(b) - t_to_x(a) < 2.0
+            {
+                self.selection = None;
+            }
+        }
+
+        if resp.clicked_by(PointerButton::Primary)
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let t = x_to_t(pos.x);
+            if shift {
+                let (a, b) = self.selection.unwrap_or((self.playhead, self.playhead));
+                let anchor = if (t - a).abs() > (t - b).abs() { a } else { b };
+                self.selection = Some((anchor.min(t), anchor.max(t)));
+                self.playhead = anchor.min(t);
+            } else {
+                self.selection = None;
+                self.playhead = t;
+                // Clicking during playback continues from the new position.
+                if self.player.is_playing() {
+                    self.play_range(t, duration);
+                }
+            }
+        }
+        if resp.double_clicked_by(PointerButton::Primary) {
+            self.select_all();
         }
     }
 
@@ -639,16 +942,35 @@ impl AudioPaintApp {
         }
     }
 
-    fn handle_keys(&mut self, ui: &egui::Ui) {
-        if ui.ctx().egui_wants_keyboard_input() {
+    /// Runs before the panels so shortcuts (e.g. Space) are consumed before a focused
+    /// button could also react to them.
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let Some(duration) = self.loaded.as_ref().map(|l| l.audio.duration()) else {
+        let Some(duration) = self.duration() else {
             return;
         };
+        let (space, escape, select_all) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::Space),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+                i.consume_key(Modifiers::COMMAND, Key::A),
+            )
+        });
+        if space {
+            self.toggle_play();
+        }
+        if escape {
+            self.deselect();
+        }
+        if select_all {
+            self.select_all();
+        }
+
         let center = (self.view.t0 + self.view.t1) / 2.0;
         let span = self.view.t_span();
-        ui.input(|i| {
+        ctx.input(|i| {
             if i.key_pressed(Key::Home) || i.key_pressed(Key::F) {
                 self.view = View::full(duration);
             }
@@ -832,6 +1154,10 @@ impl eframe::App for AudioPaintApp {
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
             self.open(path, &ctx);
+        }
+        self.handle_keys(&ctx);
+        if self.player.is_playing() {
+            ctx.request_repaint();
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| {

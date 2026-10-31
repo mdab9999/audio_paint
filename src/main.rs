@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod colormap;
+mod player;
 mod spectrum;
 
 use std::path::PathBuf;
