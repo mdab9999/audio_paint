@@ -267,10 +267,119 @@ fn heal_targets(mags: &[f32], mask: &[f32], frames: usize) -> Vec<f32> {
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PasteMode {
+    /// Shift the audio after the paste position to make room.
+    Insert,
+    /// Replace the audio after the paste position (extending the file if needed).
+    Overwrite,
+}
+
+/// Copies the time range `t0..t1` (seconds) of all channels.
+pub fn extract(audio: &AudioData, t0: f64, t1: f64) -> AudioData {
+    let sr = audio.sample_rate as f64;
+    let n = audio.num_frames();
+    let a = ((t0 * sr).round().max(0.0) as usize).min(n);
+    let b = ((t1 * sr).round().max(0.0) as usize).clamp(a, n);
+    AudioData {
+        sample_rate: audio.sample_rate,
+        channels: audio.channels.iter().map(|c| c[a..b].to_vec()).collect(),
+    }
+}
+
+/// Pastes `clip` at time `at` (seconds). Returns the new audio and the pasted range in seconds.
+/// Channels are matched by index; a clip with fewer channels repeats its last channel.
+pub fn paste(
+    dest: &AudioData,
+    clip: &AudioData,
+    at: f64,
+    mode: PasteMode,
+) -> Result<(AudioData, (f64, f64)), String> {
+    if clip.sample_rate != dest.sample_rate {
+        return Err(format!(
+            "Cannot paste: the clip is {} Hz but this file is {} Hz",
+            clip.sample_rate, dest.sample_rate
+        ));
+    }
+    let clip_len = clip.num_frames();
+    if clip_len == 0 || clip.channels.is_empty() {
+        return Err("The clipboard is empty".into());
+    }
+    let len = dest.num_frames();
+    let pos = ((at * dest.sample_rate as f64).round().max(0.0) as usize).min(len);
+    let channels = dest
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(c, ch)| {
+            let src = &clip.channels[c.min(clip.channels.len() - 1)];
+            match mode {
+                PasteMode::Insert => {
+                    let mut out = Vec::with_capacity(len + clip_len);
+                    out.extend_from_slice(&ch[..pos]);
+                    out.extend_from_slice(src);
+                    out.extend_from_slice(&ch[pos..]);
+                    out
+                }
+                PasteMode::Overwrite => {
+                    let mut out = ch.clone();
+                    out.resize(len.max(pos + clip_len), 0.0);
+                    out[pos..pos + clip_len].copy_from_slice(src);
+                    out
+                }
+            }
+        })
+        .collect();
+    let sr = dest.sample_rate as f64;
+    let range = (pos as f64 / sr, (pos + clip_len) as f64 / sr);
+    Ok((
+        AudioData {
+            sample_rate: dest.sample_rate,
+            channels,
+        },
+        range,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::selection::Shape;
+
+    #[test]
+    fn copy_then_paste_insert_and_overwrite() {
+        let audio = AudioData {
+            sample_rate: 10,
+            channels: vec![(0..10).map(|i| i as f32).collect(), vec![0.5; 10]],
+        };
+        let clip = extract(&audio, 0.2, 0.5); // samples 2, 3, 4
+        assert_eq!(clip.channels[0], vec![2.0, 3.0, 4.0]);
+
+        let (ins, range) = paste(&audio, &clip, 0.8, PasteMode::Insert).unwrap();
+        assert_eq!(range, (0.8, 1.1));
+        assert_eq!(
+            ins.channels[0],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0, 3.0, 4.0, 8.0, 9.0
+            ]
+        );
+        assert_eq!(ins.channels[1].len(), 13);
+
+        let (over, _) = paste(&audio, &clip, 0.1, PasteMode::Overwrite).unwrap();
+        assert_eq!(
+            over.channels[0],
+            vec![0.0, 2.0, 3.0, 4.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
+        // Overwriting past the end extends the file.
+        let (ext, _) = paste(&audio, &clip, 0.9, PasteMode::Overwrite).unwrap();
+        assert_eq!(&ext.channels[0][8..], &[8.0, 2.0, 3.0, 4.0]);
+
+        let other_rate = AudioData {
+            sample_rate: 20,
+            channels: clip.channels.clone(),
+        };
+        assert!(paste(&audio, &other_rate, 0.0, PasteMode::Insert).is_err());
+    }
 
     fn tone(sr: u32, secs: f64, freqs: &[f32]) -> Vec<f32> {
         (0..(sr as f64 * secs) as usize)

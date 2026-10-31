@@ -11,9 +11,9 @@ use eframe::egui::{
     Rect, Response, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
 };
 
-use crate::audio::{self, AudioData};
+use crate::audio::{self, AudioData, SaveFormat};
 use crate::colormap::Colormap;
-use crate::edit::{self, EditOp};
+use crate::edit::{self, EditOp, PasteMode};
 use crate::player::Player;
 use crate::selection::{Grid, Selection, Shape, Stamp, rasterize};
 use crate::spectrum::{
@@ -168,6 +168,8 @@ enum JobResult {
         audio: Arc<AudioData>,
         spec: Arc<Spectrogram>,
         peaks: Arc<Peaks>,
+        /// Time range to select afterwards (e.g. the pasted audio).
+        select: Option<(f64, f64)>,
     },
     Failed(String),
 }
@@ -280,6 +282,11 @@ pub struct AudioPaintApp {
     /// Audio has edits that were not exported yet.
     modified: bool,
     notice: Option<String>,
+    /// Audio copied with Copy; kept when another file is opened.
+    clipboard: Option<Arc<AudioData>>,
+    save_dialog: bool,
+    save_format: SaveFormat,
+    save_job: Option<Receiver<Result<PathBuf, String>>>,
 }
 
 impl AudioPaintApp {
@@ -321,6 +328,10 @@ impl AudioPaintApp {
             overlay_key: None,
             modified: false,
             notice: None,
+            clipboard: None,
+            save_dialog: false,
+            save_format: SaveFormat::Wav16,
+            save_job: None,
         };
         if let Some(path) = initial_file {
             app.open(path, &cc.egui_ctx);
@@ -446,7 +457,17 @@ impl AudioPaintApp {
                     loaded.analysis = target;
                 }
             }
-            JobResult::Edited { audio, spec, peaks } => {
+            JobResult::Edited {
+                audio,
+                spec,
+                peaks,
+                select,
+            } => {
+                if let Some((a, b)) = select {
+                    self.selection = Some((a, b));
+                    self.playhead = a;
+                    self.clear_spectral();
+                }
                 if let Some(loaded) = &mut self.loaded {
                     let previous = std::mem::replace(&mut loaded.audio, audio);
                     self.undo.push(previous);
@@ -506,24 +527,27 @@ impl AudioPaintApp {
         Some(region)
     }
 
-    /// Applies `op` in the background, then re-analyses; the result becomes undoable.
-    fn run_edit(&mut self, ctx: &egui::Context, op: EditOp, region: Selection) {
+    /// Runs `work` on the current audio in the background, then re-analyses; the result
+    /// becomes undoable. `work` may also return a time range to select afterwards.
+    fn run_audio_job(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce(&AudioData) -> Result<(AudioData, Option<(f64, f64)>), String>
+        + Send
+        + 'static,
+    ) {
         if self.job.as_ref().is_some_and(|j| j.is_load) {
             return;
         }
         let Some(loaded) = &self.loaded else { return };
         let audio = loaded.audio.clone();
-        // Edit the channel on display, or all channels when showing the mix.
-        let channels: Vec<usize> = match self.channel {
-            Some(c) => vec![c],
-            None => (0..audio.channels.len()).collect(),
-        };
         let target = self.analysis();
         self.player.stop();
         self.notice = None;
         self.spawn_job(ctx, target, false, move |progress, stage| {
             stage.store(2, Ordering::Relaxed);
-            let edited = Arc::new(edit::apply(&audio, &region, op, &channels));
+            let (edited, select) = work(&audio)?;
+            let edited = Arc::new(edited);
             stage.store(1, Ordering::Relaxed);
             progress.store(0, Ordering::Relaxed);
             let (spec, peaks) = analyze(&edited, target, progress);
@@ -531,7 +555,51 @@ impl AudioPaintApp {
                 audio: edited,
                 spec,
                 peaks,
+                select,
             })
+        });
+    }
+
+    fn run_edit(&mut self, ctx: &egui::Context, op: EditOp, region: Selection) {
+        let Some(loaded) = &self.loaded else { return };
+        // Edit the channel on display, or all channels when showing the mix.
+        let channels: Vec<usize> = match self.channel {
+            Some(c) => vec![c],
+            None => (0..loaded.audio.channels.len()).collect(),
+        };
+        self.run_audio_job(ctx, move |audio| {
+            Ok((edit::apply(audio, &region, op, &channels), None))
+        });
+    }
+
+    /// The time range that copy uses: the time selection, or the spectral selection's extent.
+    fn copy_range(&self) -> Option<(f64, f64)> {
+        let spectral = self.spectral.bounds().map(|(a, b, _, _)| (a.max(0.0), b));
+        self.selection.or(spectral).filter(|(a, b)| b > a)
+    }
+
+    fn copy(&mut self, ctx: &egui::Context) {
+        let (Some(loaded), Some((a, b))) = (&self.loaded, self.copy_range()) else {
+            return;
+        };
+        let clip = edit::extract(&loaded.audio, a, b);
+        let secs = clip.duration();
+        self.clipboard = Some(Arc::new(clip));
+        // Put a note on the system clipboard too: Ctrl+V only reaches the app when the
+        // system clipboard is not empty.
+        ctx.copy_text(format!("Audio Paint clip ({secs:.3} s)"));
+        self.notice = Some(format!("Copied {secs:.3} s"));
+    }
+
+    /// Pastes the clipboard at the playhead and selects the pasted audio.
+    fn paste(&mut self, ctx: &egui::Context, mode: PasteMode) {
+        let Some(clip) = self.clipboard.clone() else {
+            return;
+        };
+        let at = self.playhead;
+        self.run_audio_job(ctx, move |audio| {
+            let (pasted, range) = edit::paste(audio, &clip, at, mode)?;
+            Ok((pasted, Some(range)))
         });
     }
 
@@ -568,24 +636,127 @@ impl AudioPaintApp {
         self.reanalyze(ctx);
     }
 
-    fn export_wav(&mut self) {
+    /// Asks for a file name, then encodes and writes the file in the background.
+    fn save_as(&mut self, ctx: &egui::Context) {
         let Some(loaded) = &self.loaded else { return };
+        let format = self.save_format;
+        let ext = format.extension();
         let stem = loaded
             .path
             .file_stem()
             .map_or("audio".into(), |s| s.to_string_lossy().into_owned());
         let picked = rfd::FileDialog::new()
-            .add_filter("WAV (32-bit float)", &["wav"])
-            .set_file_name(format!("{stem}_edited.wav"))
+            .add_filter(format.name(), &[ext])
+            .set_file_name(format!("{stem}_edited.{ext}"))
             .save_file();
-        if let Some(path) = picked {
-            match audio::write_wav(&path, &loaded.audio) {
-                Ok(()) => {
-                    self.notice = Some(format!("Saved {}", file_name(&path)));
-                    self.modified = false;
-                }
-                Err(e) => self.error = Some(e),
+        let Some(mut path) = picked else { return };
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            != Some(ext.into())
+        {
+            path.set_extension(ext);
+        }
+        let audio = loaded.audio.clone();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = audio::save(&path, &audio, format).map(|()| path);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.save_job = Some(rx);
+        self.save_dialog = false;
+        self.notice = Some(format!("Saving as {}...", format.name()));
+        self.error = None;
+    }
+
+    fn poll_save(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.save_job else { return };
+        match rx.try_recv() {
+            Ok(Ok(path)) => {
+                self.notice = Some(format!("Saved {}", file_name(&path)));
+                self.modified = false;
+                self.save_job = None;
             }
+            Ok(Err(e)) => {
+                self.error = Some(e);
+                self.notice = None;
+                self.save_job = None;
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+            Err(TryRecvError::Disconnected) => self.save_job = None,
+        }
+    }
+
+    fn save_dialog_window(&mut self, ctx: &egui::Context) {
+        if !self.save_dialog {
+            return;
+        }
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new("Save as")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let mp3_kbps = match self.save_format {
+                    SaveFormat::Mp3(k) => k,
+                    _ => 320,
+                };
+                for format in [
+                    SaveFormat::Wav16,
+                    SaveFormat::Wav24,
+                    SaveFormat::WavFloat,
+                    SaveFormat::Mp3(mp3_kbps),
+                ] {
+                    let label = match format {
+                        SaveFormat::Mp3(_) => "MP3".to_string(),
+                        f => f.name(),
+                    };
+                    let selected = std::mem::discriminant(&self.save_format)
+                        == std::mem::discriminant(&format);
+                    if ui.radio(selected, label).clicked() {
+                        self.save_format = format;
+                    }
+                }
+                if let SaveFormat::Mp3(kbps) = &mut self.save_format {
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        ui.label("Bit rate");
+                        egui::ComboBox::from_id_salt("mp3 bitrate")
+                            .selected_text(format!("{kbps} kbit/s"))
+                            .show_ui(ui, |ui| {
+                                for k in SaveFormat::MP3_BITRATES {
+                                    ui.selectable_value(kbps, k, format!("{k} kbit/s"));
+                                }
+                            });
+                    });
+                }
+                ui.weak(match self.save_format {
+                    SaveFormat::WavFloat => "Lossless; keeps levels above 0 dBFS.",
+                    SaveFormat::Mp3(_) => {
+                        "Lossy, small files. Sample rates above 48 kHz become 48 kHz."
+                    }
+                    _ => "Most compatible. Samples above 0 dBFS are clipped.",
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save...").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.save_dialog = false;
+                    }
+                });
+            });
+        if !open {
+            self.save_dialog = false;
+        }
+        if save {
+            self.save_as(ctx);
         }
     }
 
@@ -711,17 +882,20 @@ impl AudioPaintApp {
                 self.pick_file(ui.ctx());
             }
             let has_audio = self.loaded.is_some();
-            let export_label = if self.modified {
-                "Export WAV... *"
+            let save_label = if self.modified {
+                "Save as... *"
             } else {
-                "Export WAV..."
+                "Save as..."
             };
             if ui
-                .add_enabled(has_audio, egui::Button::new(export_label))
-                .on_hover_text("Save the (edited) audio as a 32-bit float WAV file")
+                .add_enabled(
+                    has_audio && self.save_job.is_none(),
+                    egui::Button::new(save_label),
+                )
+                .on_hover_text("Save the (edited) audio as WAV or MP3 (Ctrl+S)")
                 .clicked()
             {
-                self.export_wav();
+                self.save_dialog = true;
             }
             if ui
                 .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo"))
@@ -736,6 +910,33 @@ impl AudioPaintApp {
                 .clicked()
             {
                 self.redo(ui.ctx());
+            }
+            ui.separator();
+            if ui
+                .add_enabled(self.copy_range().is_some(), egui::Button::new("Copy"))
+                .on_hover_text("Copy the selected time range (Ctrl+C)")
+                .clicked()
+            {
+                self.copy(ui.ctx());
+            }
+            let can_paste = has_audio && self.clipboard.is_some();
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste insert"))
+                .on_hover_text(
+                    "Insert the clipboard at the cursor, moving later audio back (Ctrl+V)",
+                )
+                .clicked()
+            {
+                self.paste(ui.ctx(), PasteMode::Insert);
+            }
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste overwrite"))
+                .on_hover_text(
+                    "Replace the audio from the cursor with the clipboard (Ctrl+Shift+V)",
+                )
+                .clicked()
+            {
+                self.paste(ui.ctx(), PasteMode::Overwrite);
             }
             ui.separator();
             self.transport(ui);
@@ -874,6 +1075,10 @@ impl AudioPaintApp {
                         "Cursor {}",
                         format_time(self.playhead, 0.001, long)
                     ));
+                }
+                if let Some(clip) = &self.clipboard {
+                    ui.label(format!("Clipboard {:.3} s", clip.duration()))
+                        .on_hover_text("Ctrl+V inserts at the cursor, Ctrl+Shift+V overwrites");
                 }
                 if let Some((a, b)) = self.selection {
                     ui.label(format!(
@@ -1489,13 +1694,39 @@ impl AudioPaintApp {
             self.select_all();
         }
 
+        // Shift is ignored unless asked for, so the Shift variants must be consumed first.
+        // Ctrl+C and Ctrl+V arrive as clipboard events, not as key presses.
+        let (copy, paste_insert, paste_overwrite, save) = ctx.input_mut(|i| {
+            let paste_overwrite = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V);
+            let has = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
+            (
+                has(|e| matches!(e, egui::Event::Copy)),
+                has(|e| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_))),
+                paste_overwrite,
+                i.consume_key(Modifiers::COMMAND, Key::S),
+            )
+        });
+        if copy {
+            self.copy(ctx);
+        }
+        if paste_insert && self.clipboard.is_some() {
+            self.paste(ctx, PasteMode::Insert);
+        }
+        if paste_overwrite && self.clipboard.is_some() {
+            self.paste(ctx, PasteMode::Overwrite);
+        }
+        if save && self.save_job.is_none() {
+            self.save_dialog = true;
+        }
+
         let (delete, undo, redo, smaller, larger, tool) = ctx.input_mut(|i| {
+            let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+                || i.consume_key(Modifiers::COMMAND, Key::Y);
             (
                 i.consume_key(Modifiers::NONE, Key::Delete)
                     || i.consume_key(Modifiers::NONE, Key::Backspace),
                 i.consume_key(Modifiers::COMMAND, Key::Z),
-                i.consume_key(Modifiers::COMMAND, Key::Y)
-                    || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
+                redo,
                 i.consume_key(Modifiers::NONE, Key::OpenBracket),
                 i.consume_key(Modifiers::NONE, Key::CloseBracket),
                 Tool::ALL
@@ -1730,6 +1961,8 @@ impl eframe::App for AudioPaintApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_job(&ctx);
+        self.poll_save(&ctx);
+        self.save_dialog_window(&ctx);
 
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {

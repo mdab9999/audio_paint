@@ -7,7 +7,8 @@ spectrum: mute or lower a noise, or heal a click from the surrounding audio.
 Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 [Symphonia](https://github.com/pdeljanov/Symphonia) for decoding,
 [RustFFT](https://github.com/ejmahler/RustFFT) for analysis and processing and
-[rodio](https://github.com/RustAudio/rodio) for playback.
+[rodio](https://github.com/RustAudio/rodio) for playback and
+[LAME](https://lame.sourceforge.io/) (via `mp3lame-encoder`, LGPL) for MP3 encoding.
 
 ## Features
 
@@ -25,8 +26,22 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
   that the view can follow
 - **Spectral selection tools**: marquee, lasso, paintbrush, and a spot healing brush
 - **Spectral editing**: mute the selection, change its gain, or heal it; undo/redo
-- **Export** the edited audio as a 32-bit float WAV
+- **Copy and paste** of the selected time range, inserted or overwriting at the cursor
+- **Save as** WAV (16-bit, 24-bit or 32-bit float) or MP3 (128 to 320 kbit/s)
 - Analysis and editing run in the background on all CPU cores
+
+## Copy, paste and save
+
+- **Copy** (Ctrl+C) copies the time selection, or the time range of the spectral selection,
+  from all channels. The clipboard is kept when you open another file, so you can paste
+  between files with the same sample rate.
+- **Paste insert** (Ctrl+V) inserts the clip at the cursor and moves the following audio back.
+- **Paste overwrite** (Ctrl+Shift+V) replaces the audio from the cursor on, extending the
+  file if the clip runs past the end.
+- The pasted audio is selected afterwards, and every paste can be undone.
+- **Save as** (Ctrl+S) writes WAV 16-bit PCM, WAV 24-bit PCM, WAV 32-bit float (lossless,
+  keeps levels above 0 dBFS) or MP3 at 128 to 320 kbit/s (encoded with LAME; more than two
+  channels are mixed down to stereo, sample rates above 48 kHz become 48 kHz).
 
 ## Spectral editing
 
