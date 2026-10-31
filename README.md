@@ -98,3 +98,26 @@ cargo run --release -- path\to\file.mp3
 The release executable is written to `target/release/audio_paint.exe`. On Windows,
 `build.rs` embeds `assets/icon/audio_paint.ico` as the program icon; the window and
 taskbar icon is loaded from `assets/icon/png/audio_paint_256.png`.
+
+## Windows installer
+
+```
+powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
+```
+
+This builds the release executable and `dist\AudioPaint-<version>-setup.exe` (the version comes
+from `Cargo.toml`). It needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`).
+
+The installer:
+
+- installs for the current user without admin rights, or for all users if chosen
+- adds a Start menu entry, and optionally a desktop icon
+- optionally adds "Open with Audio Paint" for MP3, WAV, FLAC, OGG, M4A and AAC files
+  (without changing the default player)
+- registers an uninstaller in Windows "Apps & features"
+- is available in English and German
+
+The executable links the C runtime statically (`.cargo/config.toml`), so it runs on PCs
+without the Visual C++ Redistributable. The installer is not code-signed, so Windows
+SmartScreen may warn when it is first run ("More info" -> "Run anyway").

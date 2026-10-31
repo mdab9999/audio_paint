@@ -1,0 +1,4 @@
+# Link the C runtime statically so audio_paint.exe runs on PCs without the
+# Visual C++ Redistributable (needed for the installer).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
