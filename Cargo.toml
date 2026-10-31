@@ -1,0 +1,11 @@
+[package]
+name = "audio_paint"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.37.0"
+rayon = "1.12.0"
+rfd = "0.17.2"
+rustfft = "6.4.1"
+symphonia = { version = "0.6.1", features = ["mp3", "aac", "isomp4"] }
