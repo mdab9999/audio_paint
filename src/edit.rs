@@ -373,15 +373,34 @@ pub enum PasteMode {
     Overwrite,
 }
 
-/// Copies the time range `t0..t1` (seconds) of all channels.
-pub fn extract(audio: &AudioData, t0: f64, t1: f64) -> AudioData {
+/// Sample range `a..b` for the time range `t0..t1` (seconds), clamped to the audio.
+fn sample_range(audio: &AudioData, t0: f64, t1: f64) -> (usize, usize) {
     let sr = audio.sample_rate as f64;
     let n = audio.num_frames();
     let a = ((t0 * sr).round().max(0.0) as usize).min(n);
     let b = ((t1 * sr).round().max(0.0) as usize).clamp(a, n);
+    (a, b)
+}
+
+/// Copies the time range `t0..t1` (seconds) of all channels.
+pub fn extract(audio: &AudioData, t0: f64, t1: f64) -> AudioData {
+    let (a, b) = sample_range(audio, t0, t1);
     AudioData {
         sample_rate: audio.sample_rate,
         channels: audio.channels.iter().map(|c| c[a..b].to_vec()).collect(),
+    }
+}
+
+/// Removes the time range `t0..t1` (seconds) from all channels; the audio after it moves up.
+pub fn remove(audio: &AudioData, t0: f64, t1: f64) -> AudioData {
+    let (a, b) = sample_range(audio, t0, t1);
+    AudioData {
+        sample_rate: audio.sample_rate,
+        channels: audio
+            .channels
+            .iter()
+            .map(|c| c[..a].iter().chain(&c[b..]).copied().collect())
+            .collect(),
     }
 }
 
@@ -483,6 +502,22 @@ mod tests {
         assert_eq!(&rev.channels[0][..7], &[0.0, 1.0, 5.0, 4.0, 3.0, 2.0, 6.0]);
         let inv = apply_effect(&ramp, None, &[0], Effect::Invert);
         assert_eq!(inv.channels[0][3], -3.0);
+    }
+
+    #[test]
+    fn cut_is_extract_then_remove() {
+        let audio = AudioData {
+            sample_rate: 10,
+            channels: vec![(0..10).map(|i| i as f32).collect(), vec![0.5; 10]],
+        };
+        let clip = extract(&audio, 0.2, 0.5);
+        let rest = remove(&audio, 0.2, 0.5);
+        assert_eq!(clip.channels[0], vec![2.0, 3.0, 4.0]);
+        assert_eq!(rest.channels[0], vec![0.0, 1.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        assert_eq!(rest.channels[1].len(), 7);
+        // Pasting the clip back where it was restores the original.
+        let (restored, _) = paste(&rest, &clip, 0.2, PasteMode::Insert).unwrap();
+        assert_eq!(restored.channels, audio.channels);
     }
 
     #[test]

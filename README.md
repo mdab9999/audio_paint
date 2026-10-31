@@ -43,12 +43,15 @@ The window follows the layout of Adobe Audition's Waveform editor:
 - **Effects**: Amplify, Normalize, Fade In, Fade Out, Silence, Invert, Reverse (on the time
   selection, or the whole file without one)
 - **History** of every edit; click an entry to go back to it (or Ctrl+Z / Ctrl+Y)
-- **Copy and paste** of the selected time range, inserted or overwriting at the cursor
+- **Cut, copy and paste** of the selected time range, inserted or overwriting at the cursor
+- Asks to save unsaved changes when a file is closed or the app exits
 - **Save as** WAV (16-bit, 24-bit or 32-bit float) or MP3 (128 to 320 kbit/s)
 - Analysis and editing run in the background on all CPU cores
 
-## Copy, paste and save
+## Cut, copy, paste and save
 
+- **Cut** (Ctrl+X) copies the time selection to the clipboard and removes it from the file;
+  the following audio moves up. It can be undone like any other edit.
 - **Copy** (Ctrl+C) copies the time selection, or the time range of the spectral selection,
   from all channels. The clipboard is kept when you open another file, so you can paste
   between files with the same sample rate.
@@ -56,6 +59,8 @@ The window follows the layout of Adobe Audition's Waveform editor:
 - **Paste overwrite** (Ctrl+Shift+V) replaces the audio from the cursor on, extending the
   file if the clip runs past the end.
 - The pasted audio is selected afterwards, and every paste can be undone.
+- Closing a file with unsaved changes, or closing the app, asks **Save As... / Don't Save /
+  Cancel** for each unsaved file; the file closes (or the app exits) once it is saved.
 - **Save as** (Ctrl+S) writes WAV 16-bit PCM, WAV 24-bit PCM, WAV 32-bit float (lossless,
   keeps levels above 0 dBFS) or MP3 at 128 to 320 kbit/s (encoded with LAME; more than two
   channels are mixed down to stereo, sample rates above 48 kHz become 48 kHz).

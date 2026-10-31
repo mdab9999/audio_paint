@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 
 use super::util::{channel_name, format_bytes, format_time, parse_time};
-use super::{AudioPaintApp, EffectDialog, SideTab, Tool, theme};
+use super::{AfterSave, AudioPaintApp, EffectDialog, SideTab, Tool, theme};
 use crate::audio::SaveFormat;
 use crate::colormap::Colormap;
 use crate::edit::{EditOp, Effect, PasteMode};
@@ -15,7 +15,7 @@ use crate::spectrum::{FFT_SIZES, WindowKind};
 const SHORTCUTS: &str = "\
 Files      Ctrl+O open, Ctrl+S save as, Ctrl+W close
 Edit       Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo
-           Ctrl+C copy, Ctrl+V paste (insert), Ctrl+Shift+V overwrite paste
+           Ctrl+X cut, Ctrl+C copy, Ctrl+V paste (insert), Ctrl+Shift+V overwrite paste
            Delete mute the selection, Ctrl+A select all, Esc deselect
 Tools      T time selection, E marquee, D lasso, B paintbrush, S spot healing, H hand
            Shift adds to a spectral selection, Alt subtracts; [ and ] brush size
@@ -240,6 +240,16 @@ impl AudioPaintApp {
                 ui.separator();
                 let can_copy = self.time_range().is_some();
                 let can_paste = has_audio && self.clipboard.is_some() && idle;
+                if ui
+                    .add_enabled(
+                        self.selection.is_some() && idle,
+                        egui::Button::new("Cut").shortcut_text("Ctrl+X"),
+                    )
+                    .on_hover_text("Copy the selected time range and remove it from the file")
+                    .clicked()
+                {
+                    self.cut(&ctx);
+                }
                 if ui
                     .add_enabled(can_copy, egui::Button::new("Copy").shortcut_text("Ctrl+C"))
                     .clicked()
@@ -900,7 +910,7 @@ impl AudioPaintApp {
         self.save_dialog_window(ctx);
         self.settings_window(ctx);
         self.effect_dialog_window(ctx);
-        self.close_confirm_window(ctx);
+        self.save_prompt_window(ctx);
 
         egui::Window::new("Keyboard Shortcuts")
             .open(&mut self.shortcuts_window)
@@ -925,6 +935,7 @@ impl AudioPaintApp {
         }
         let mut open = true;
         let mut save = false;
+        let mut cancel = false;
         egui::Window::new("Save As")
             .open(&mut open)
             .collapsible(false)
@@ -977,12 +988,14 @@ impl AudioPaintApp {
                         save = true;
                     }
                     if ui.button("Cancel").clicked() {
-                        self.save_dialog = false;
+                        cancel = true;
                     }
                 });
             });
-        if !open {
+        if !open || cancel {
+            // Cancelling also cancels a close or exit that was waiting for this save.
             self.save_dialog = false;
+            self.cancel_after_save();
         }
         if save {
             self.save_as(ctx);
@@ -1150,34 +1163,52 @@ impl AudioPaintApp {
         }
     }
 
-    fn close_confirm_window(&mut self, ctx: &egui::Context) {
-        let Some(index) = self.close_confirm else {
+    /// "Save changes to ... before closing/exiting?" with Save, Don't Save and Cancel.
+    fn save_prompt_window(&mut self, ctx: &egui::Context) {
+        let Some((index, why)) = self.save_prompt else {
             return;
         };
         let name = self.doc_info(index).map_or_else(String::new, |i| i.0);
-        let mut choice = None;
-        egui::Window::new("Close File")
+        let (title, question) = match why {
+            AfterSave::CloseFile => ("Close File", "before closing"),
+            AfterSave::Exit => ("Exit Audio Paint", "before exiting"),
+        };
+        // Saving another file needs the editor to switch to it, which waits for jobs.
+        let can_save = (index == self.active || !self.busy()) && self.save_job.is_none();
+        let mut answer = None;
+        let mut open = true;
+        egui::Window::new(title)
+            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!("\"{name}\" has unsaved changes."));
-                ui.label("Close it anyway? The changes will be lost.");
+                ui.label(format!("Save changes to \"{name}\" {question}?"));
+                ui.label(
+                    RichText::new("Your changes will be lost if you don't save them.")
+                        .color(theme::TEXT_DIM),
+                );
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Close Without Saving").clicked() {
-                        choice = Some(true);
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save As..."))
+                        .clicked()
+                    {
+                        answer = Some(Some(true));
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        answer = Some(Some(false));
                     }
                     if ui.button("Cancel").clicked() {
-                        choice = Some(false);
+                        answer = Some(None);
                     }
                 });
             });
-        if let Some(close) = choice {
-            self.close_confirm = None;
-            if close {
-                self.close_doc(index, true, ctx);
-            }
+        if !open {
+            answer = Some(None);
+        }
+        if let Some(answer) = answer {
+            self.answer_save_prompt(answer, ctx);
         }
     }
 }

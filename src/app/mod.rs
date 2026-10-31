@@ -257,6 +257,15 @@ enum SideTab {
     Effects,
 }
 
+/// Why the "save changes?" question is asked, and what happens once it is answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterSave {
+    /// Close the file shown in the editor.
+    CloseFile,
+    /// Continue exiting the app (and ask about the next unsaved file).
+    Exit,
+}
+
 /// Effects with a parameter dialog.
 #[derive(Clone, Copy, PartialEq)]
 enum EffectDialog {
@@ -357,8 +366,14 @@ pub struct AudioPaintApp {
     shortcuts_window: bool,
     about_window: bool,
     effect_dialog: Option<EffectDialog>,
-    /// Index of a modified file waiting for "close anyway?".
-    close_confirm: Option<usize>,
+    /// File (index in `docs`) whose "save changes?" question is shown, and why.
+    save_prompt: Option<(usize, AfterSave)>,
+    /// Action to finish once the running save succeeds.
+    after_save: Option<AfterSave>,
+    /// Files the user chose not to save while exiting.
+    exit_discarded: Vec<usize>,
+    /// Exit confirmed: let the window close.
+    exiting: bool,
     save_dialog: bool,
     save_format: SaveFormat,
     save_job: Option<Receiver<Result<PathBuf, String>>>,
@@ -419,7 +434,10 @@ impl AudioPaintApp {
             shortcuts_window: false,
             about_window: false,
             effect_dialog: None,
-            close_confirm: None,
+            save_prompt: None,
+            after_save: None,
+            exit_discarded: Vec::new(),
+            exiting: false,
             save_dialog: false,
             save_format: SaveFormat::Wav16,
             save_job: None,
@@ -513,7 +531,11 @@ impl AudioPaintApp {
     }
 
     fn switch_to(&mut self, index: usize, ctx: &egui::Context) {
-        if index == self.active || index >= self.docs.len() || self.busy() {
+        if index == self.active
+            || index >= self.docs.len()
+            || self.busy()
+            || self.save_job.is_some()
+        {
             return;
         }
         if let Some(current) = self.take_active() {
@@ -525,20 +547,27 @@ impl AudioPaintApp {
         }
     }
 
-    /// Closes a file; asks first when it has unsaved changes (unless `force`).
-    fn close_doc(&mut self, index: usize, force: bool, ctx: &egui::Context) {
-        if index >= self.docs.len() || (index == self.active && self.busy()) {
-            return;
-        }
-        let modified = if index == self.active {
+    fn doc_modified(&self, index: usize) -> bool {
+        if index == self.active {
             self.history.modified()
         } else {
-            self.docs[index]
-                .as_ref()
+            self.docs
+                .get(index)
+                .and_then(Option::as_ref)
                 .is_some_and(|d| d.history.modified())
-        };
-        if modified && !force {
-            self.close_confirm = Some(index);
+        }
+    }
+
+    /// Closes a file; asks to save first when it has unsaved changes (unless `force`).
+    fn close_doc(&mut self, index: usize, force: bool, ctx: &egui::Context) {
+        if index >= self.docs.len()
+            || (index == self.active && self.busy())
+            || self.save_job.is_some()
+        {
+            return;
+        }
+        if self.doc_modified(index) && !force {
+            self.save_prompt = Some((index, AfterSave::CloseFile));
             return;
         }
         if index == self.active {
@@ -845,6 +874,28 @@ impl AudioPaintApp {
         self.notice = Some(format!("Copied {secs:.3} s"));
     }
 
+    /// Copies the time selection to the clipboard and removes it from the file.
+    fn cut(&mut self, ctx: &egui::Context) {
+        let (Some(loaded), Some((a, b))) = (&self.loaded, self.selection) else {
+            return;
+        };
+        if self.busy() {
+            return;
+        }
+        let clip = edit::extract(&loaded.audio, a, b);
+        let secs = clip.duration();
+        self.clipboard = Some(Arc::new(clip));
+        // A note on the system clipboard makes Ctrl+V reach the app later.
+        ctx.copy_text(format!("Audio Paint clip ({secs:.3} s)"));
+        self.selection = None;
+        self.clear_spectral();
+        self.playhead = a;
+        self.run_audio_job(ctx, "Cut".into(), move |audio| {
+            Ok((edit::remove(audio, a, b), None))
+        });
+        self.notice = Some(format!("Cut {secs:.3} s"));
+    }
+
     /// Pastes the clipboard at the playhead and selects the pasted audio.
     fn paste(&mut self, ctx: &egui::Context, mode: PasteMode) {
         let Some(clip) = self.clipboard.clone() else {
@@ -910,7 +961,10 @@ impl AudioPaintApp {
             .add_filter(format.name(), &[ext])
             .set_file_name(format!("{stem}_edited.{ext}"))
             .save_file();
-        let Some(mut path) = picked else { return };
+        let Some(mut path) = picked else {
+            self.cancel_after_save();
+            return;
+        };
         if path
             .extension()
             .and_then(|e| e.to_str())
@@ -942,15 +996,79 @@ impl AudioPaintApp {
             Ok(Ok(path)) => {
                 self.notice = Some(format!("Saved {}", file_name(&path)));
                 self.save_job = None;
+                match self.after_save.take() {
+                    Some(AfterSave::CloseFile) => self.close_doc(self.active, true, ctx),
+                    Some(AfterSave::Exit) => self.continue_exit(ctx),
+                    None => {}
+                }
             }
             Ok(Err(e)) => {
                 self.error = Some(e);
                 self.notice = None;
                 self.history.saved = None;
                 self.save_job = None;
+                self.cancel_after_save();
             }
             Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             Err(TryRecvError::Disconnected) => self.save_job = None,
+        }
+    }
+
+    /// The user cancelled saving: forget the pending close or exit.
+    fn cancel_after_save(&mut self) {
+        self.after_save = None;
+        self.exit_discarded.clear();
+    }
+
+    /// Answer to "save changes?": `Some(true)` save, `Some(false)` don't save, `None` cancel.
+    fn answer_save_prompt(&mut self, answer: Option<bool>, ctx: &egui::Context) {
+        let Some((index, why)) = self.save_prompt.take() else {
+            return;
+        };
+        match answer {
+            Some(true) => {
+                self.switch_to(index, ctx);
+                if index == self.active {
+                    self.after_save = Some(why);
+                    self.save_dialog = true;
+                }
+            }
+            Some(false) => match why {
+                AfterSave::CloseFile => self.close_doc(index, true, ctx),
+                AfterSave::Exit => {
+                    self.exit_discarded.push(index);
+                    self.continue_exit(ctx);
+                }
+            },
+            None => self.cancel_after_save(),
+        }
+    }
+
+    /// Asks about the next unsaved file before exiting, or exits when none is left.
+    fn continue_exit(&mut self, ctx: &egui::Context) {
+        let next = (0..self.docs.len())
+            .find(|&i| self.doc_modified(i) && !self.exit_discarded.contains(&i));
+        match next {
+            Some(i) => self.save_prompt = Some((i, AfterSave::Exit)),
+            None => {
+                self.exiting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Window close button (or File > Exit): ask about unsaved files first.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.exiting {
+            return;
+        }
+        let unsaved = (0..self.docs.len()).any(|i| self.doc_modified(i));
+        if unsaved || self.save_job.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.save_job.is_none() && self.save_prompt.is_none() && !self.save_dialog {
+                self.exit_discarded.clear();
+                self.continue_exit(ctx);
+            }
         }
     }
 
@@ -1178,13 +1296,17 @@ impl AudioPaintApp {
         if redo {
             self.redo(ctx);
         }
-        let (copy, paste_insert) = ctx.input(|i| {
+        let (cut, copy, paste_insert) = ctx.input(|i| {
             let has = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
             (
+                has(|e| matches!(e, egui::Event::Cut)),
                 has(|e| matches!(e, egui::Event::Copy)),
                 has(|e| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_))),
             )
         });
+        if cut {
+            self.cut(ctx);
+        }
         if copy {
             self.copy(ctx);
         }
@@ -1279,6 +1401,7 @@ impl eframe::App for AudioPaintApp {
         let ctx = ui.ctx().clone();
         self.poll_job(&ctx);
         self.poll_save(&ctx);
+        self.handle_close_request(&ctx);
         self.update_playback();
         self.update_meters(ctx.input(|i| i.time));
 
