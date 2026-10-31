@@ -57,13 +57,31 @@ impl Player {
         }
     }
 
-    /// Current playback position in seconds, or `None` when nothing is playing.
+    /// Pauses or resumes; does nothing when nothing is playing.
+    pub fn set_paused(&mut self, paused: bool) {
+        if let Some(player) = &self.current {
+            if paused {
+                player.pause();
+            } else {
+                player.play();
+            }
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|p| p.is_paused() && !p.empty())
+    }
+
+    /// Current playback position in seconds (also while paused), or `None` when stopped.
     pub fn position(&self) -> Option<f64> {
         let player = self.current.as_ref()?;
         (!player.empty()).then(|| self.start_t + player.get_pos().as_secs_f64())
     }
 
+    /// Playing and not paused.
     pub fn is_playing(&self) -> bool {
-        self.position().is_some()
+        self.position().is_some() && !self.is_paused()
     }
 }

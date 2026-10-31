@@ -10,22 +10,39 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 [rodio](https://github.com/RustAudio/rodio) for playback and
 [LAME](https://lame.sourceforge.io/) (via `mp3lame-encoder`, LGPL) for MP3 encoding.
 
+## Layout
+
+The window follows the layout of Adobe Audition's Waveform editor:
+
+- **Menu bar**: File, Edit, Effects, View, Window, Help
+- **Tool bar**: Time Selection, Marquee, Lasso, Paintbrush, Spot Healing and Hand tools, and
+  toggles for the waveform and the spectral frequency display
+- **Files** panel with all open files, and **History** / **Effects** panels below it
+- **Editor**: zoom navigator, one waveform lane per channel with a dB ruler, the spectral
+  frequency display with a Hz ruler, the time ruler and the red current-time indicator
+- **Transport and zoom** controls with a large time display
+- **Levels** meter during playback and **Selection/View** fields that can be typed into
+- **Status bar** with the playback state and the file's format, size and duration
+
 ## Features
 
-- Opens **MP3, WAV**, and also FLAC, OGG/Vorbis and AAC/M4A
-  (open dialog, drag and drop, or a file passed on the command line)
+- Opens **MP3, WAV**, and also FLAC, OGG/Vorbis and AAC/M4A, several files at once
+  (File > Open, drag and drop, or files passed on the command line)
 - Spectrogram (short-time FFT) with selectable FFT size (256 to 16384, default 4096) and window
   (Blackman-Harris, Hann, Hamming), 75 % overlap
 - Logarithmic frequency scale by default (more detail in the low frequencies), or linear
 - Colour maps: Spectral (Audition-like), Viridis, Grayscale; adjustable dB floor and ceiling
-- Mono mix or a single channel
-- Waveform lane and overview strip, all synchronised with the spectral view
+- Spectral display of the mono mix or a single channel (View > Spectral Display Settings)
+- Waveform lane per channel with amplitude zoom, and a zoom navigator
 - Live cursor readout: time, frequency and level in dB
 - Time selection in the waveform, shown across all lanes and the overview
-- Playback of the whole file, the selection, or from the cursor, with a moving play cursor
-  that the view can follow
+- Playback of the selection or from the cursor, with pause, loop and a playhead the view
+  can follow; level meters with peak hold
 - **Spectral selection tools**: marquee, lasso, paintbrush, and a spot healing brush
-- **Spectral editing**: mute the selection, change its gain, or heal it; undo/redo
+- **Spectral editing**: mute the selection, change its gain, or heal it
+- **Effects**: Amplify, Normalize, Fade In, Fade Out, Silence, Invert, Reverse (on the time
+  selection, or the whole file without one)
+- **History** of every edit; click an entry to go back to it (or Ctrl+Z / Ctrl+Y)
 - **Copy and paste** of the selected time range, inserted or overwriting at the cursor
 - **Save as** WAV (16-bit, 24-bit or 32-bit float) or MP3 (128 to 320 kbit/s)
 - Analysis and editing run in the background on all CPU cores
@@ -47,6 +64,7 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 
 | Tool | Key | Use |
 |---|---|---|
+| Time Selection | T | Drag to select a time range (also in the spectral display) |
 | Hand | H | Pan (drag) and zoom (double-click to fit) |
 | Marquee | E | Drag a rectangular time-frequency block |
 | Lasso | D | Draw a freehand shape around a noise |
@@ -71,21 +89,23 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 
 | Action | Input |
 |---|---|
-| Select a time range | Drag in the waveform |
+| Open / Save As / Close | Ctrl+O / Ctrl+S / Ctrl+W |
+| Select a time range | Drag in the waveform (or the spectral display with the Time tool) |
 | Resize the selection | Drag one of its edges |
 | Extend the selection | Shift + click or Shift + drag |
-| Deselect and set the cursor | Click in the waveform, or Esc / "Deselect" |
-| Select all | Double-click the waveform, Ctrl+A or "Select all" |
-| Play selection (or from cursor) / stop | Space, or "Play" / "Stop" |
-| Play the whole file | "Play all" |
-| Zoom time | Mouse wheel |
-| Zoom frequency | Ctrl + mouse wheel (or pinch) |
-| Pan time | Shift + wheel, hand tool drag, middle-drag, or arrow keys |
-| Pan frequency | Alt + wheel, or hand tool drag |
+| Deselect and set the playhead | Click in the waveform, or Esc |
+| Select all | Double-click the waveform, or Ctrl+A |
+| Play / stop | Space, or the transport buttons (also Pause and Loop) |
+| Move playhead to start / end | Home / End, or the transport buttons |
+| Zoom time | Mouse wheel, + / -, or the zoom buttons |
+| Zoom frequency | Ctrl + mouse wheel on the spectral display |
+| Zoom amplitude | Ctrl + mouse wheel on the waveform, or the zoom buttons |
+| Scroll time | Shift + wheel, Hand tool, middle-drag, or arrow keys |
+| Scroll frequency | Alt + wheel, or the Hand tool |
 | Zoom to a region | Right-drag a box |
-| Jump to a position | Click or drag in the overview strip |
-| Zoom to fit | Double-click with the hand tool, Home or F |
-| Zoom time in/out | + / - |
+| Jump to a position | Click or drag in the zoom navigator |
+| Zoom out full | F, or double-click the navigator |
+| Set selection or view numerically | Type or drag in the Selection/View panel |
 
 ## Build and run
 

@@ -267,6 +267,104 @@ fn heal_targets(mags: &[f32], mask: &[f32], frames: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Time-domain effects, applied to a time range (or the whole file).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Effect {
+    /// Gain in dB.
+    Amplify(f32),
+    /// Scale so the highest peak reaches this level in dBFS.
+    Normalize(f32),
+    FadeIn,
+    FadeOut,
+    Silence,
+    Invert,
+    Reverse,
+}
+
+impl Effect {
+    pub fn name(self) -> String {
+        match self {
+            Self::Amplify(db) => format!("Amplify {db:+.1} dB"),
+            Self::Normalize(db) => format!("Normalize to {db:.1} dB"),
+            Self::FadeIn => "Fade In".into(),
+            Self::FadeOut => "Fade Out".into(),
+            Self::Silence => "Silence".into(),
+            Self::Invert => "Invert".into(),
+            Self::Reverse => "Reverse".into(),
+        }
+    }
+}
+
+/// Returns a copy of `audio` with `effect` applied to `range` (seconds; `None` = whole file)
+/// in the given channels.
+pub fn apply_effect(
+    audio: &AudioData,
+    range: Option<(f64, f64)>,
+    channels: &[usize],
+    effect: Effect,
+) -> AudioData {
+    let n = audio.num_frames();
+    let sr = audio.sample_rate as f64;
+    let (a, b) = match range {
+        Some((t0, t1)) => {
+            let a = ((t0 * sr).round().max(0.0) as usize).min(n);
+            (a, ((t1 * sr).round().max(0.0) as usize).clamp(a, n))
+        }
+        None => (0, n),
+    };
+    let channels: Vec<usize> = channels
+        .iter()
+        .copied()
+        .filter(|&c| c < audio.channels.len())
+        .collect();
+
+    // Normalize uses one gain for all channels, so their balance is kept.
+    let normalize_gain = match effect {
+        Effect::Normalize(db) => {
+            let peak = channels
+                .iter()
+                .flat_map(|&c| audio.channels[c][a..b].iter())
+                .fold(0.0f32, |m, v| m.max(v.abs()));
+            if peak > 0.0 {
+                10f32.powf(db / 20.0) / peak
+            } else {
+                1.0
+            }
+        }
+        _ => 1.0,
+    };
+    let len = (b - a).max(1) as f32;
+
+    let mut out = AudioData {
+        sample_rate: audio.sample_rate,
+        channels: audio.channels.clone(),
+    };
+    for &c in &channels {
+        let seg = &mut out.channels[c][a..b];
+        match effect {
+            Effect::Amplify(db) => {
+                let g = 10f32.powf(db / 20.0);
+                seg.iter_mut().for_each(|v| *v *= g);
+            }
+            Effect::Normalize(_) => seg.iter_mut().for_each(|v| *v *= normalize_gain),
+            Effect::FadeIn => {
+                for (i, v) in seg.iter_mut().enumerate() {
+                    *v *= i as f32 / len;
+                }
+            }
+            Effect::FadeOut => {
+                for (i, v) in seg.iter_mut().enumerate() {
+                    *v *= 1.0 - (i + 1) as f32 / len;
+                }
+            }
+            Effect::Silence => seg.fill(0.0),
+            Effect::Invert => seg.iter_mut().for_each(|v| *v = -*v),
+            Effect::Reverse => seg.reverse(),
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PasteMode {
     /// Shift the audio after the paste position to make room.
@@ -345,6 +443,47 @@ pub fn paste(
 mod tests {
     use super::*;
     use crate::selection::Shape;
+
+    #[test]
+    fn effects_change_only_the_range_and_channels() {
+        let audio = AudioData {
+            sample_rate: 10,
+            channels: vec![vec![0.5; 10], vec![0.25; 10]],
+        };
+        let range = Some((0.2, 0.6)); // samples 2..6
+        let both = [0, 1];
+
+        let amp = apply_effect(&audio, range, &[0], Effect::Amplify(6.0206));
+        assert!((amp.channels[0][3] - 1.0).abs() < 1e-3);
+        assert_eq!(amp.channels[0][1], 0.5);
+        assert_eq!(amp.channels[1], audio.channels[1]);
+
+        let norm = apply_effect(&audio, None, &both, Effect::Normalize(0.0));
+        assert!((norm.channels[0][0] - 1.0).abs() < 1e-6);
+        assert!(
+            (norm.channels[1][0] - 0.5).abs() < 1e-6,
+            "channel balance kept"
+        );
+
+        let fade = apply_effect(&audio, range, &both, Effect::FadeIn);
+        assert_eq!(fade.channels[0][2], 0.0);
+        assert!(fade.channels[0][5] < 0.5 && fade.channels[0][6] == 0.5);
+        let fade = apply_effect(&audio, range, &both, Effect::FadeOut);
+        assert_eq!(fade.channels[0][5], 0.0);
+
+        let silent = apply_effect(&audio, range, &both, Effect::Silence);
+        assert_eq!(&silent.channels[0][2..6], &[0.0; 4]);
+        assert_eq!(silent.channels[0][6], 0.5);
+
+        let ramp = AudioData {
+            sample_rate: 10,
+            channels: vec![(0..10).map(|i| i as f32).collect()],
+        };
+        let rev = apply_effect(&ramp, range, &[0], Effect::Reverse);
+        assert_eq!(&rev.channels[0][..7], &[0.0, 1.0, 5.0, 4.0, 3.0, 2.0, 6.0]);
+        let inv = apply_effect(&ramp, None, &[0], Effect::Invert);
+        assert_eq!(inv.channels[0][3], -3.0);
+    }
 
     #[test]
     fn copy_then_paste_insert_and_overwrite() {

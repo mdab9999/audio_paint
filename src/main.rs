@@ -22,8 +22,8 @@ pub const APP_TITLE: &str = concat!(
 );
 
 fn main() -> eframe::Result {
-    // An audio file can be passed on the command line (or dropped onto the .exe).
-    let initial_file = std::env::args_os().nth(1).map(PathBuf::from);
+    // Audio files can be passed on the command line (or dropped onto the .exe).
+    let initial_files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -43,6 +43,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Audio Paint",
         options,
-        Box::new(|cc| Ok(Box::new(app::AudioPaintApp::new(cc, initial_file)))),
+        Box::new(|cc| Ok(Box::new(app::AudioPaintApp::new(cc, initial_files)))),
     )
 }
