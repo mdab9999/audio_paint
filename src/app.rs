@@ -7,13 +7,15 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Response,
-    Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
+    self, Align2, Color32, ColorImage, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2,
+    Rect, Response, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
 };
 
 use crate::audio::{self, AudioData};
 use crate::colormap::Colormap;
+use crate::edit::{self, EditOp};
 use crate::player::Player;
+use crate::selection::{Grid, Selection, Shape, Stamp, rasterize};
 use crate::spectrum::{
     self, FFT_SIZES, Peaks, RenderParams, Spectrogram, WindowKind, freq_to_u, u_to_freq,
 };
@@ -29,14 +31,106 @@ const AXIS_TEXT: Color32 = Color32::from_gray(190);
 const PLAY_COLOR: Color32 = Color32::from_rgb(255, 230, 80);
 const SELECTION_FILL: Color32 = Color32::from_rgba_premultiplied(40, 40, 40, 40);
 const SELECTION_EDGE: Color32 = Color32::from_rgba_premultiplied(170, 170, 170, 170);
+const SPECTRAL_TINT: Color32 = Color32::from_rgb(150, 190, 255);
+const SPECTRAL_OUTLINE: Color32 = Color32::from_rgb(235, 242, 255);
+const MAX_UNDO: usize = 30;
 const CONTROLS_HELP: &str = "\
-Waveform: drag to select, drag an edge to resize, Shift+click to extend
+Tools: H hand (pan), E marquee, D lasso, B paintbrush, S spot healing brush
+Spectral tools: Shift adds to the selection, Alt subtracts (brush: Alt erases)
+Brush size: [ and ]    Click with marquee or lasso: clear the spectral selection
+Delete: mute the selection    Floating panel: change its gain or heal it
+Ctrl+Z / Ctrl+Y: undo / redo
+Waveform: drag to select time, drag an edge to resize, Shift+click to extend
 Waveform: click to set the cursor and deselect, double-click to select all
 Space: play / stop    Esc: deselect    Ctrl+A: select all
 Mouse wheel: zoom time    Ctrl+wheel: zoom frequency
 Shift+wheel: pan time    Alt+wheel: pan frequency
-Drag the spectrum or middle-drag: pan    Right-drag: zoom to box
-Overview: click or drag to jump    Double-click spectrum, Home or F: zoom to fit";
+Hand tool drag or middle-drag: pan    Right-drag: zoom to box
+Overview: click or drag to jump    Double-click (hand tool), Home or F: zoom to fit";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tool {
+    Hand,
+    Marquee,
+    Lasso,
+    Brush,
+    Heal,
+}
+
+impl Tool {
+    const ALL: [Self; 5] = [
+        Self::Hand,
+        Self::Marquee,
+        Self::Lasso,
+        Self::Brush,
+        Self::Heal,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hand => "Hand",
+            Self::Marquee => "Marquee",
+            Self::Lasso => "Lasso",
+            Self::Brush => "Brush",
+            Self::Heal => "Spot heal",
+        }
+    }
+
+    fn key(self) -> Key {
+        match self {
+            Self::Hand => Key::H,
+            Self::Marquee => Key::E,
+            Self::Lasso => Key::D,
+            Self::Brush => Key::B,
+            Self::Heal => Key::S,
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Hand => "Pan and zoom the view (H)",
+            Self::Marquee => "Select a rectangular time-frequency block (E)",
+            Self::Lasso => "Select a freehand shape (D)",
+            Self::Brush => "Paint a selection; Alt erases (B)",
+            Self::Heal => "Paint over a blemish to repair it from the surrounding audio (S)",
+        }
+    }
+
+    fn uses_brush(self) -> bool {
+        matches!(self, Self::Brush | Self::Heal)
+    }
+}
+
+/// Maps the on-screen spectrogram image to times and frequencies.
+struct ScreenGrid {
+    w: usize,
+    h: usize,
+    view: View,
+    nyq: f64,
+    log: bool,
+}
+
+impl Grid for ScreenGrid {
+    fn size(&self) -> (usize, usize) {
+        (self.w, self.h)
+    }
+    fn t_of_x(&self, x: f64) -> f64 {
+        self.view.t0 + x / self.w as f64 * self.view.t_span()
+    }
+    fn x_of_t(&self, t: f64) -> f64 {
+        (t - self.view.t0) / self.view.t_span() * self.w as f64
+    }
+    fn f_of_y(&self, y: f64) -> f64 {
+        u_to_freq(
+            self.view.u1 - y / self.h as f64 * self.view.u_span(),
+            self.nyq,
+            self.log,
+        )
+    }
+    fn y_of_f(&self, f: f64) -> f64 {
+        (self.view.u1 - freq_to_u(f, self.nyq, self.log)) / self.view.u_span() * self.h as f64
+    }
+}
 
 /// Distance in points within which a drag grabs a selection edge.
 const EDGE_GRAB: f32 = 6.0;
@@ -67,6 +161,11 @@ enum JobResult {
         peaks: Arc<Peaks>,
     },
     Analyzed {
+        spec: Arc<Spectrogram>,
+        peaks: Arc<Peaks>,
+    },
+    Edited {
+        audio: Arc<AudioData>,
         spec: Arc<Spectrogram>,
         peaks: Arc<Peaks>,
     },
@@ -161,6 +260,26 @@ pub struct AudioPaintApp {
     player: Player,
     /// Scroll the view to keep the play cursor visible.
     follow_playback: bool,
+
+    tool: Tool,
+    spectral: Selection,
+    /// Bumped whenever `spectral` or `drawing` changes, to refresh the overlay.
+    overlay_version: u64,
+    /// Shape being drawn with the current tool, and whether it adds to the selection.
+    drawing: Option<(Shape, bool)>,
+    draw_origin: Pos2,
+    draw_last: Pos2,
+    /// Brush radius in points.
+    brush_radius: f32,
+    gain_db: f32,
+    undo: Vec<Arc<AudioData>>,
+    redo: Vec<Arc<AudioData>>,
+    /// The spectrogram without the selection overlay.
+    base_image: Option<ColorImage>,
+    overlay_key: Option<(Option<(RenderParams, usize)>, u64)>,
+    /// Audio has edits that were not exported yet.
+    modified: bool,
+    notice: Option<String>,
 }
 
 impl AudioPaintApp {
@@ -188,6 +307,20 @@ impl AudioPaintApp {
             playhead: 0.0,
             player: Player::default(),
             follow_playback: true,
+            tool: Tool::Hand,
+            spectral: Selection::default(),
+            overlay_version: 0,
+            drawing: None,
+            draw_origin: Pos2::ZERO,
+            draw_last: Pos2::ZERO,
+            brush_radius: 12.0,
+            gain_db: -12.0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            base_image: None,
+            overlay_key: None,
+            modified: false,
+            notice: None,
         };
         if let Some(path) = initial_file {
             app.open(path, &cc.egui_ctx);
@@ -287,6 +420,13 @@ impl AudioPaintApp {
                 self.selection = None;
                 self.selection_anchor = None;
                 self.playhead = 0.0;
+                self.spectral.clear();
+                self.drawing = None;
+                self.overlay_version += 1;
+                self.undo.clear();
+                self.redo.clear();
+                self.modified = false;
+                self.notice = None;
                 let name = file_name(&path);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                     "{name} - Audio Paint"
@@ -304,6 +444,20 @@ impl AudioPaintApp {
                     loaded.spec = spec;
                     loaded.peaks = peaks;
                     loaded.analysis = target;
+                }
+            }
+            JobResult::Edited { audio, spec, peaks } => {
+                if let Some(loaded) = &mut self.loaded {
+                    let previous = std::mem::replace(&mut loaded.audio, audio);
+                    self.undo.push(previous);
+                    if self.undo.len() > MAX_UNDO {
+                        self.undo.remove(0);
+                    }
+                    self.redo.clear();
+                    loaded.spec = spec;
+                    loaded.peaks = peaks;
+                    loaded.analysis = target;
+                    self.modified = true;
                 }
             }
             JobResult::Failed(message) => self.error = Some(message),
@@ -339,6 +493,108 @@ impl AudioPaintApp {
         self.loaded.as_ref().map(|l| l.audio.duration())
     }
 
+    /// The area an edit applies to: the spectral selection, or else the time selection
+    /// across all frequencies.
+    fn edit_region(&self) -> Option<Selection> {
+        if !self.spectral.is_empty() {
+            return Some(self.spectral.clone());
+        }
+        let (a, b) = self.selection?;
+        let nyq = self.loaded.as_ref()?.audio.sample_rate as f64 / 2.0;
+        let mut region = Selection::default();
+        region.push(Shape::rect(a, b, -1.0, nyq * 1.1), true);
+        Some(region)
+    }
+
+    /// Applies `op` in the background, then re-analyses; the result becomes undoable.
+    fn run_edit(&mut self, ctx: &egui::Context, op: EditOp, region: Selection) {
+        if self.job.as_ref().is_some_and(|j| j.is_load) {
+            return;
+        }
+        let Some(loaded) = &self.loaded else { return };
+        let audio = loaded.audio.clone();
+        // Edit the channel on display, or all channels when showing the mix.
+        let channels: Vec<usize> = match self.channel {
+            Some(c) => vec![c],
+            None => (0..audio.channels.len()).collect(),
+        };
+        let target = self.analysis();
+        self.player.stop();
+        self.notice = None;
+        self.spawn_job(ctx, target, false, move |progress, stage| {
+            stage.store(2, Ordering::Relaxed);
+            let edited = Arc::new(edit::apply(&audio, &region, op, &channels));
+            stage.store(1, Ordering::Relaxed);
+            progress.store(0, Ordering::Relaxed);
+            let (spec, peaks) = analyze(&edited, target, progress);
+            Ok(JobResult::Edited {
+                audio: edited,
+                spec,
+                peaks,
+            })
+        });
+    }
+
+    fn edit_selection(&mut self, ctx: &egui::Context, op: EditOp) {
+        if let Some(region) = self.edit_region() {
+            self.run_edit(ctx, op, region);
+        }
+    }
+
+    fn undo(&mut self, ctx: &egui::Context) {
+        let Some(loaded) = &mut self.loaded else {
+            return;
+        };
+        let Some(previous) = self.undo.pop() else {
+            return;
+        };
+        self.redo
+            .push(std::mem::replace(&mut loaded.audio, previous));
+        self.after_history_step(ctx);
+    }
+
+    fn redo(&mut self, ctx: &egui::Context) {
+        let Some(loaded) = &mut self.loaded else {
+            return;
+        };
+        let Some(next) = self.redo.pop() else { return };
+        self.undo.push(std::mem::replace(&mut loaded.audio, next));
+        self.after_history_step(ctx);
+    }
+
+    fn after_history_step(&mut self, ctx: &egui::Context) {
+        self.player.stop();
+        self.modified = true;
+        self.reanalyze(ctx);
+    }
+
+    fn export_wav(&mut self) {
+        let Some(loaded) = &self.loaded else { return };
+        let stem = loaded
+            .path
+            .file_stem()
+            .map_or("audio".into(), |s| s.to_string_lossy().into_owned());
+        let picked = rfd::FileDialog::new()
+            .add_filter("WAV (32-bit float)", &["wav"])
+            .set_file_name(format!("{stem}_edited.wav"))
+            .save_file();
+        if let Some(path) = picked {
+            match audio::write_wav(&path, &loaded.audio) {
+                Ok(()) => {
+                    self.notice = Some(format!("Saved {}", file_name(&path)));
+                    self.modified = false;
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+
+    fn clear_spectral(&mut self) {
+        self.spectral.clear();
+        self.drawing = None;
+        self.overlay_version += 1;
+    }
+
     fn play_range(&mut self, t0: f64, t1: f64) {
         let Some(loaded) = &self.loaded else { return };
         if let Err(e) = self.player.play(&loaded.audio, t0, t1) {
@@ -351,7 +607,9 @@ impl AudioPaintApp {
         let Some(duration) = self.duration() else {
             return;
         };
-        match self.selection {
+        // A spectral selection plays its time range.
+        let spectral_range = self.spectral.bounds().map(|(a, b, _, _)| (a.max(0.0), b));
+        match self.selection.or(spectral_range) {
             Some((a, b)) => self.play_range(a, b),
             None => {
                 // Restart from the beginning when the playhead sits at the very end.
@@ -386,17 +644,23 @@ impl AudioPaintApp {
         }
     }
 
+    /// Clears both the time and the spectral selection.
     fn deselect(&mut self) {
         if let Some((a, _)) = self.selection.take() {
             self.playhead = a;
         }
         self.selection_anchor = None;
+        self.clear_spectral();
+    }
+
+    fn has_selection(&self) -> bool {
+        self.selection.is_some() || !self.spectral.is_empty()
     }
 
     fn transport(&mut self, ui: &mut egui::Ui) {
         let has_audio = self.loaded.is_some();
         let playing = self.player.is_playing();
-        let play_label = if self.selection.is_some() {
+        let play_label = if self.has_selection() {
             "▶ Play selection"
         } else {
             "▶ Play"
@@ -433,7 +697,7 @@ impl AudioPaintApp {
             self.select_all();
         }
         if ui
-            .add_enabled(self.selection.is_some(), egui::Button::new("Deselect"))
+            .add_enabled(self.has_selection(), egui::Button::new("Deselect"))
             .on_hover_text("Clear the selection (Esc)")
             .clicked()
         {
@@ -446,9 +710,56 @@ impl AudioPaintApp {
             if ui.button("Open...").clicked() {
                 self.pick_file(ui.ctx());
             }
+            let has_audio = self.loaded.is_some();
+            let export_label = if self.modified {
+                "Export WAV... *"
+            } else {
+                "Export WAV..."
+            };
+            if ui
+                .add_enabled(has_audio, egui::Button::new(export_label))
+                .on_hover_text("Save the (edited) audio as a 32-bit float WAV file")
+                .clicked()
+            {
+                self.export_wav();
+            }
+            if ui
+                .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo"))
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
+                self.undo(ui.ctx());
+            }
+            if ui
+                .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo"))
+                .on_hover_text("Ctrl+Y")
+                .clicked()
+            {
+                self.redo(ui.ctx());
+            }
             ui.separator();
             self.transport(ui);
             ui.separator();
+
+            for tool in Tool::ALL {
+                let label = format!("{} ({:?})", tool.label(), tool.key());
+                if ui
+                    .selectable_label(self.tool == tool, label)
+                    .on_hover_text(tool.hint())
+                    .clicked()
+                {
+                    self.tool = tool;
+                }
+            }
+            if self.tool.uses_brush() {
+                ui.add(
+                    egui::Slider::new(&mut self.brush_radius, 2.0..=80.0)
+                        .text("Brush size")
+                        .integer(),
+                )
+                .on_hover_text("[ and ] change the size");
+            }
+            ui.end_row();
 
             ui.label("FFT size");
             egui::ComboBox::from_id_salt("FFT size")
@@ -529,6 +840,7 @@ impl AudioPaintApp {
                 ui.spinner();
                 let stage = match job.stage.load(Ordering::Relaxed) {
                     0 => "Decoding",
+                    2 => "Processing",
                     _ => "Analysing",
                 };
                 let pct = job.progress.load(Ordering::Relaxed) as f32 / 10.0;
@@ -537,6 +849,10 @@ impl AudioPaintApp {
             }
             if let Some(err) = &self.error {
                 ui.colored_label(Color32::from_rgb(255, 110, 110), err);
+                ui.separator();
+            }
+            if let Some(notice) = &self.notice {
+                ui.colored_label(Color32::from_rgb(140, 220, 140), notice);
                 ui.separator();
             }
             if let Some(l) = &self.loaded {
@@ -732,6 +1048,94 @@ impl AudioPaintApp {
             painter.rect_filled(r, 0.0, Color32::from_white_alpha(25));
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Inside);
         }
+
+        // Brush outline at the pointer.
+        if self.tool.uses_brush()
+            && let Some(pos) = spec_resp.hover_pos()
+        {
+            let color = if self.tool == Tool::Heal {
+                Color32::from_rgb(255, 200, 120)
+            } else {
+                Color32::WHITE
+            };
+            painter.with_clip_rect(spec_rect).circle_stroke(
+                pos,
+                self.brush_radius,
+                Stroke::new(1.0, color),
+            );
+        }
+
+        self.gain_panel(ui, spec_rect, wave_rect, nyq);
+    }
+
+    /// Floating panel next to the selection: gain, mute and heal (like Audition's HUD).
+    fn gain_panel(&mut self, ui: &egui::Ui, spec_rect: Rect, wave_rect: Option<Rect>, nyq: f64) {
+        if self.drawing.is_some() || self.job.as_ref().is_some_and(|j| j.is_load) {
+            return;
+        }
+        let v = self.view;
+        let t_to_x =
+            |t: f64| spec_rect.left() + ((t - v.t0) / v.t_span()) as f32 * spec_rect.width();
+        let f_to_y = |f: f64| {
+            let u = freq_to_u(f.max(1e-3), nyq, self.log_scale);
+            spec_rect.bottom() - ((u - v.u0) / v.u_span()) as f32 * spec_rect.height()
+        };
+        // Anchor at the top-right corner of the selection, kept inside the spectrum.
+        let anchor = if let Some((_, t1, _, f1)) = self.spectral.bounds() {
+            pos2(t_to_x(t1), f_to_y(f1))
+        } else if let Some((_, b)) = self.selection {
+            pos2(t_to_x(b), wave_rect.unwrap_or(spec_rect).top())
+        } else {
+            return;
+        };
+        let pos = pos2(
+            (anchor.x + 8.0).clamp(
+                spec_rect.left(),
+                (spec_rect.right() - 300.0).max(spec_rect.left()),
+            ),
+            anchor.y.clamp(
+                spec_rect.top(),
+                (spec_rect.bottom() - 90.0).max(spec_rect.top()),
+            ),
+        );
+        let busy = self.job.is_some();
+        let ctx = ui.ctx().clone();
+        let mut action = None;
+        egui::Area::new(egui::Id::unique("gain_panel"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Gain");
+                        ui.add(
+                            egui::Slider::new(&mut self.gain_db, -40.0..=20.0)
+                                .suffix(" dB")
+                                .fixed_decimals(1),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if ui.button("Apply gain").clicked() {
+                                action = Some(EditOp::Gain(10f32.powf(self.gain_db / 20.0)));
+                            }
+                            if ui.button("Mute (Del)").clicked() {
+                                action = Some(EditOp::Gain(0.0));
+                            }
+                            if ui
+                                .button("Heal")
+                                .on_hover_text("Rebuild the area from the surrounding audio")
+                                .clicked()
+                            {
+                                action = Some(EditOp::Heal);
+                            }
+                        });
+                    });
+                });
+            });
+        if let Some(op) = action {
+            self.edit_selection(&ctx, op);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -794,8 +1198,13 @@ impl AudioPaintApp {
             self.handle_selection(ui, resp, rect, duration);
         }
 
-        // The spectrum pans with the left button; both lanes pan with the middle button.
-        if (is_spec && resp.dragged_by(PointerButton::Primary))
+        if is_spec && self.tool != Tool::Hand {
+            self.handle_spectral_tool(ui, resp, rect, nyq);
+        }
+
+        // The hand tool pans with the left button; both lanes pan with the middle button.
+        let hand = is_spec && self.tool == Tool::Hand;
+        if (hand && resp.dragged_by(PointerButton::Primary))
             || resp.dragged_by(PointerButton::Middle)
         {
             let d = resp.drag_delta();
@@ -830,8 +1239,120 @@ impl AudioPaintApp {
             }
         }
 
-        if is_spec && resp.double_clicked() {
+        if hand && resp.double_clicked() {
             self.view = View::full(duration);
+        }
+    }
+
+    /// Marquee, lasso, paintbrush and spot healing on the spectrum.
+    fn handle_spectral_tool(&mut self, ui: &egui::Ui, resp: &Response, rect: Rect, nyq: f64) {
+        let v = self.view;
+        let log = self.log_scale;
+        let u_at = |p: Pos2| v.u1 - ((p.y - rect.top()) / rect.height()) as f64 * v.u_span();
+        let tf = |p: Pos2| {
+            let t = v.t0 + ((p.x - rect.left()) / rect.width()) as f64 * v.t_span();
+            (t, u_to_freq(u_at(p).clamp(0.0, 1.0), nyq, log))
+        };
+        let radius = self.brush_radius;
+        let stamp = |p: Pos2| {
+            let (t, f) = tf(p);
+            let ru = (radius / rect.height()) as f64 * v.u_span();
+            Stamp {
+                t,
+                f,
+                rt: (radius / rect.width()) as f64 * v.t_span(),
+                f_lo: u_to_freq(u_at(p) - ru, nyq, log),
+                f_hi: u_to_freq(u_at(p) + ru, nyq, log),
+            }
+        };
+
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(if self.tool.uses_brush() {
+                CursorIcon::None
+            } else {
+                CursorIcon::Crosshair
+            });
+        }
+
+        let (pressed, released, mods, pointer) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.modifiers,
+                i.pointer.latest_pos(),
+            )
+        });
+
+        if pressed
+            && resp.hovered()
+            && let Some(p) = pointer
+        {
+            let add = !mods.alt;
+            // The brush accumulates strokes; marquee and lasso replace unless Shift/Alt is held.
+            let replace =
+                !matches!(self.tool, Tool::Brush | Tool::Heal) && !mods.shift && !mods.alt;
+            if replace {
+                self.clear_spectral();
+            }
+            let shape = match self.tool {
+                Tool::Marquee => {
+                    let (t, f) = tf(p);
+                    Shape::rect(t, t, f, f)
+                }
+                Tool::Lasso => Shape::Lasso(vec![tf(p)]),
+                _ => Shape::Brush(vec![stamp(p)]),
+            };
+            self.drawing = Some((shape, add));
+            self.draw_origin = p;
+            self.draw_last = p;
+            self.overlay_version += 1;
+        }
+
+        if let (Some((shape, _)), Some(p)) = (&mut self.drawing, pointer) {
+            let p = rect.clamp(p);
+            let mut changed = false;
+            match shape {
+                Shape::Rect { .. } => {
+                    let (ta, fa) = tf(self.draw_origin);
+                    let (tb, fb) = tf(p);
+                    *shape = Shape::rect(ta, tb, fa, fb);
+                    changed = p != self.draw_last;
+                }
+                Shape::Lasso(points) => {
+                    if p.distance(self.draw_last) > 2.0 {
+                        points.push(tf(p));
+                        changed = true;
+                    }
+                }
+                Shape::Brush(stamps) => {
+                    let dist = p.distance(self.draw_last);
+                    let spacing = (radius / 3.0).max(1.0);
+                    if dist >= spacing {
+                        let steps = (dist / spacing).ceil() as usize;
+                        for s in 1..=steps {
+                            stamps.push(stamp(self.draw_last.lerp(p, s as f32 / steps as f32)));
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.draw_last = p;
+                self.overlay_version += 1;
+            }
+        }
+
+        if released && let Some((shape, add)) = self.drawing.take() {
+            self.overlay_version += 1;
+            if self.tool == Tool::Heal {
+                let mut region = Selection::default();
+                region.push(shape, true);
+                if !region.is_empty() {
+                    self.run_edit(ui.ctx(), EditOp::Heal, region);
+                }
+            } else {
+                self.spectral.push(shape, add);
+            }
         }
     }
 
@@ -968,6 +1489,39 @@ impl AudioPaintApp {
             self.select_all();
         }
 
+        let (delete, undo, redo, smaller, larger, tool) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace),
+                i.consume_key(Modifiers::COMMAND, Key::Z),
+                i.consume_key(Modifiers::COMMAND, Key::Y)
+                    || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
+                i.consume_key(Modifiers::NONE, Key::OpenBracket),
+                i.consume_key(Modifiers::NONE, Key::CloseBracket),
+                Tool::ALL
+                    .into_iter()
+                    .find(|t| i.consume_key(Modifiers::NONE, t.key())),
+            )
+        });
+        if delete {
+            self.edit_selection(ctx, EditOp::Gain(0.0));
+        }
+        if undo {
+            self.undo(ctx);
+        }
+        if redo {
+            self.redo(ctx);
+        }
+        if smaller {
+            self.brush_radius = (self.brush_radius / 1.25).max(2.0);
+        }
+        if larger {
+            self.brush_radius = (self.brush_radius * 1.25).min(80.0);
+        }
+        if let Some(tool) = tool {
+            self.tool = tool;
+        }
+
         let center = (self.view.t0 + self.view.t1) / 2.0;
         let span = self.view.t_span();
         ctx.input(|i| {
@@ -1013,7 +1567,33 @@ impl AudioPaintApp {
         };
         let key = (params, Arc::as_ptr(spec) as usize);
         if self.rendered.as_ref() != Some(&key) {
-            let image = spectrum::render(spec, &key.0);
+            self.base_image = Some(spectrum::render(spec, &key.0));
+            self.rendered = Some(key);
+        }
+
+        // Composite the spectral selection (and the shape being drawn) over the base image.
+        let overlay_key = (self.rendered.clone(), self.overlay_version);
+        if self.overlay_key.as_ref() != Some(&overlay_key)
+            && let Some(base) = &self.base_image
+        {
+            let shapes: Vec<&(Shape, bool)> = self
+                .spectral
+                .shapes
+                .iter()
+                .chain(self.drawing.as_ref())
+                .collect();
+            let image = if shapes.is_empty() {
+                base.clone()
+            } else {
+                let grid = ScreenGrid {
+                    w: base.size[0],
+                    h: base.size[1],
+                    view: self.view,
+                    nyq: spec.nyquist(),
+                    log: self.log_scale,
+                };
+                composite_selection(base, &rasterize(shapes, &grid))
+            };
             match &mut self.texture {
                 Some(tex) => tex.set(image, TextureOptions::NEAREST),
                 None => {
@@ -1024,7 +1604,7 @@ impl AudioPaintApp {
                     ));
                 }
             }
-            self.rendered = Some(key);
+            self.overlay_key = Some(overlay_key);
         }
         if let Some(tex) = &self.texture {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1170,6 +1750,45 @@ impl eframe::App for AudioPaintApp {
 
         self.check_reanalysis(&ctx);
     }
+}
+
+/// Tints the selected pixels and outlines the selection edge (2 px wide).
+fn composite_selection(base: &ColorImage, mask: &[f32]) -> ColorImage {
+    let [w, h] = base.size;
+    let mut out = base.clone();
+    let inside = |x: isize, y: isize| {
+        x >= 0
+            && y >= 0
+            && (x as usize) < w
+            && (y as usize) < h
+            && mask[y as usize * w + x as usize] > 0.5
+    };
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            if !inside(x, y) {
+                continue;
+            }
+            let edge = [
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-2, 0),
+                (2, 0),
+                (0, -2),
+                (0, 2),
+            ]
+            .iter()
+            .any(|(dx, dy)| !inside(x + dx, y + dy));
+            let px = &mut out.pixels[y as usize * w + x as usize];
+            *px = if edge {
+                SPECTRAL_OUTLINE
+            } else {
+                px.lerp_to_gamma(SPECTRAL_TINT, 0.3)
+            };
+        }
+    }
+    out
 }
 
 fn analyze(audio: &AudioData, a: Analysis, progress: &AtomicU32) -> (Arc<Spectrogram>, Arc<Peaks>) {

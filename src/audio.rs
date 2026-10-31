@@ -120,3 +120,58 @@ pub fn decode_file(path: &Path, progress: &AtomicU32) -> Result<AudioData, Strin
         channels,
     })
 }
+
+/// Writes the audio as a 32-bit float WAV file (lossless for the edited samples).
+pub fn write_wav(path: &Path, audio: &AudioData) -> Result<(), String> {
+    use std::io::{BufWriter, Write};
+
+    let channels = audio.channels.len() as u16;
+    let frames = audio.num_frames();
+    let data_len = frames as u64 * channels as u64 * 4;
+    if data_len > u32::MAX as u64 - 64 {
+        return Err("Audio is too long for a WAV file".into());
+    }
+    let byte_rate = audio.sample_rate * channels as u32 * 4;
+
+    let write = || -> std::io::Result<()> {
+        let mut w = BufWriter::new(File::create(path)?);
+        w.write_all(b"RIFF")?;
+        w.write_all(&(36 + data_len as u32).to_le_bytes())?;
+        w.write_all(b"WAVEfmt ")?;
+        w.write_all(&16u32.to_le_bytes())?;
+        w.write_all(&3u16.to_le_bytes())?; // IEEE float
+        w.write_all(&channels.to_le_bytes())?;
+        w.write_all(&audio.sample_rate.to_le_bytes())?;
+        w.write_all(&byte_rate.to_le_bytes())?;
+        w.write_all(&(channels * 4).to_le_bytes())?;
+        w.write_all(&32u16.to_le_bytes())?;
+        w.write_all(b"data")?;
+        w.write_all(&(data_len as u32).to_le_bytes())?;
+        for i in 0..frames {
+            for ch in &audio.channels {
+                w.write_all(&ch[i].to_le_bytes())?;
+            }
+        }
+        w.flush()
+    };
+    write().map_err(|e| format!("Cannot write {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_round_trip() {
+        let audio = AudioData {
+            sample_rate: 22050,
+            channels: vec![vec![0.0, 0.5, -0.25, 1.0], vec![0.1, -0.1, 0.2, -0.2]],
+        };
+        let path = std::env::temp_dir().join("audio_paint_round_trip.wav");
+        write_wav(&path, &audio).unwrap();
+        let back = decode_file(&path, &AtomicU32::new(0)).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.sample_rate, 22050);
+        assert_eq!(back.channels, audio.channels);
+    }
+}
