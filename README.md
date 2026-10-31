@@ -13,9 +13,9 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 
 - Opens **MP3, WAV**, and also FLAC, OGG/Vorbis and AAC/M4A
   (open dialog, drag and drop, or a file passed on the command line)
-- Spectrogram (short-time FFT) with selectable FFT size (256 to 16384) and window
+- Spectrogram (short-time FFT) with selectable FFT size (256 to 16384, default 4096) and window
   (Blackman-Harris, Hann, Hamming), 75 % overlap
-- Linear or logarithmic frequency scale
+- Logarithmic frequency scale by default (more detail in the low frequencies), or linear
 - Colour maps: Spectral (Audition-like), Viridis, Grayscale; adjustable dB floor and ceiling
 - Mono mix or a single channel
 - Waveform lane and overview strip, all synchronised with the spectral view
