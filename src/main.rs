@@ -13,13 +13,21 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
+/// "Audio Paint <version>.<build>", e.g. "Audio Paint 0.1.0.7".
+pub const APP_TITLE: &str = concat!(
+    "Audio Paint ",
+    env!("CARGO_PKG_VERSION"),
+    ".",
+    env!("AUDIO_PAINT_BUILD")
+);
+
 fn main() -> eframe::Result {
     // An audio file can be passed on the command line (or dropped onto the .exe).
     let initial_file = std::env::args_os().nth(1).map(PathBuf::from);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Audio Paint")
+            .with_title(APP_TITLE)
             .with_inner_size([1100.0, 680.0])
             .with_maximized(true)
             .with_min_inner_size([640.0, 420.0])

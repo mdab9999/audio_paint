@@ -440,7 +440,8 @@ impl AudioPaintApp {
                 self.notice = None;
                 let name = file_name(&path);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{name} - Audio Paint"
+                    "{name} - {}",
+                    crate::APP_TITLE
                 )));
                 self.loaded = Some(Loaded {
                     path,

@@ -1,5 +1,5 @@
 ﻿; Inno Setup script for Audio Paint. Build it with installer\build_installer.ps1,
-; which compiles the release executable first and passes the version from Cargo.toml.
+; which compiles the release executable first and passes its version (<version>.<build>).
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"

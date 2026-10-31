@@ -105,8 +105,7 @@ taskbar icon is loaded from `assets/icon/png/audio_paint_256.png`.
 powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
 
-This builds the release executable and `dist\AudioPaint-<version>-setup.exe` (the version comes
-from `Cargo.toml`). It needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+This builds the release executable and `dist\AudioPaint-<version>.<build>-setup.exe`. It needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)
 (`winget install JRSoftware.InnoSetup`).
 
 The installer:
@@ -121,3 +120,13 @@ The installer:
 The executable links the C runtime statically (`.cargo/config.toml`), so it runs on PCs
 without the Visual C++ Redistributable. The installer is not code-signed, so Windows
 SmartScreen may warn when it is first run ("More info" -> "Run anyway").
+
+## Version and build number
+
+The version is `<version from Cargo.toml>.<build number>`, for example `0.1.0.2`. It is shown
+in the window title, in the file properties of `audio_paint.exe` and in the installer.
+
+`build.rs` increments `build_number.txt` on every **release** build that compiles changed
+sources (`cargo build --release`, `installeruild_installer.ps1`). Debug builds and editor
+checks reuse the current number, and a release build without changes keeps it. Commit
+`build_number.txt` together with the code it belongs to.
