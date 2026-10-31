@@ -68,12 +68,34 @@ fn tool_icon(tool: Tool) -> Icon {
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: Icon, hint: &str, enabled: bool, on: bool) -> Response {
+    icon_text_button(ui, icon, "", hint, enabled, on)
+}
+
+/// Icon button with an optional text label to the right of the icon.
+fn icon_text_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    hint: &str,
+    enabled: bool,
+    on: bool,
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
-    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 24.0), sense);
+    let text_color = if enabled {
+        Color32::from_gray(225)
+    } else {
+        Color32::from_gray(100)
+    };
+    let galley = (!text.is_empty()).then(|| {
+        ui.painter()
+            .layout_no_wrap(text.to_string(), FontId::proportional(13.0), text_color)
+    });
+    let width = galley.as_ref().map_or(30.0, |g| 28.0 + g.size().x + 8.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), sense);
     let resp = resp.on_hover_text(hint);
     let painter = ui.painter_at(rect);
     let bg = if on {
@@ -89,7 +111,19 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, hint: &str, enabled: bool, on: boo
     } else {
         Color32::from_gray(100)
     };
-    draw_icon(&painter, rect.center(), icon, color);
+    match galley {
+        Some(galley) => {
+            draw_icon(
+                &painter,
+                pos2(rect.left() + 15.0, rect.center().y),
+                icon,
+                color,
+            );
+            let pos = pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0);
+            painter.galley(pos, galley, text_color);
+        }
+        None => draw_icon(&painter, rect.center(), icon, color),
+    }
     resp
 }
 
@@ -581,13 +615,14 @@ impl AudioPaintApp {
                 .on_hover_text("Waveform editor workspace");
             ui.separator();
             for tool in Tool::ALL {
-                if icon_button(ui, tool_icon(tool), tool.hint(), true, self.tool == tool).clicked()
-                {
+                let on = self.tool == tool;
+                let label = tool.short_label();
+                if icon_text_button(ui, tool_icon(tool), label, tool.hint(), true, on).clicked() {
                     self.tool = tool;
                 }
             }
             ui.separator();
-            ui.label(RichText::new("Brush").color(theme::TEXT_DIM));
+            ui.label(RichText::new("Brush size").color(theme::TEXT_DIM));
             ui.add(egui::Slider::new(&mut self.brush_radius, 2.0..=80.0).integer())
                 .on_hover_text("Size of the Paintbrush and Spot Healing brushes ([ and ])");
             ui.separator();
@@ -595,12 +630,22 @@ impl AudioPaintApp {
             let ctx = ui.ctx().clone();
             let has_audio = self.loaded.is_some();
             let idle = !self.busy();
-            if icon_button(ui, Icon::SelectAll, "Select All (Ctrl+A)", has_audio, false).clicked() {
+            if icon_text_button(
+                ui,
+                Icon::SelectAll,
+                "Select All",
+                "Select the whole file (Ctrl+A)",
+                has_audio,
+                false,
+            )
+            .clicked()
+            {
                 self.select_all();
             }
-            if icon_button(
+            if icon_text_button(
                 ui,
                 Icon::Deselect,
+                "Deselect",
                 "Deselect All (Esc)",
                 self.has_selection(),
                 false,
@@ -610,17 +655,20 @@ impl AudioPaintApp {
                 self.deselect();
             }
             let can_cut = self.selection.is_some() && idle;
-            if icon_button(ui, Icon::Cut, "Cut (Ctrl+X)", can_cut, false).clicked() {
+            let hint = "Copy the time selection and remove it (Ctrl+X)";
+            if icon_text_button(ui, Icon::Cut, "Cut", hint, can_cut, false).clicked() {
                 self.cut(&ctx);
             }
             let can_copy = self.time_range().is_some();
-            if icon_button(ui, Icon::Copy, "Copy (Ctrl+C)", can_copy, false).clicked() {
+            let hint = "Copy the selected time range (Ctrl+C)";
+            if icon_text_button(ui, Icon::Copy, "Copy", hint, can_copy, false).clicked() {
                 self.copy(&ctx);
             }
             let can_paste = has_audio && self.clipboard.is_some() && idle;
-            if icon_button(
+            if icon_text_button(
                 ui,
                 Icon::Paste,
+                "Paste",
                 "Paste at the playhead (Ctrl+V)",
                 can_paste,
                 false,

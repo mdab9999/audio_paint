@@ -76,6 +76,18 @@ impl Tool {
         }
     }
 
+    /// Short name shown next to the icon in the tool bar.
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::Time => "Time",
+            Self::Marquee => "Marquee",
+            Self::Lasso => "Lasso",
+            Self::Brush => "Brush",
+            Self::Heal => "Spot Heal",
+            Self::Hand => "Hand",
+        }
+    }
+
     fn hint(self) -> &'static str {
         match self {
             Self::Time => "Time Selection tool (T): drag to select a time range",
