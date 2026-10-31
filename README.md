@@ -95,4 +95,6 @@ Requires the Rust toolchain (on Windows with the MSVC build tools).
 cargo run --release -- path\to\file.mp3
 ```
 
-The release executable is written to `target/release/audio_paint.exe`.
+The release executable is written to `target/release/audio_paint.exe`. On Windows,
+`build.rs` embeds `assets/icon/audio_paint.ico` as the program icon; the window and
+taskbar icon is loaded from `assets/icon/png/audio_paint_256.png`.

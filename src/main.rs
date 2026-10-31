@@ -23,7 +23,13 @@ fn main() -> eframe::Result {
             .with_inner_size([1100.0, 680.0])
             .with_maximized(true)
             .with_min_inner_size([640.0, 420.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../assets/icon/png/audio_paint_256.png"
+                ))
+                .expect("embedded icon is a valid PNG"),
+            ),
         ..Default::default()
     };
     eframe::run_native(
