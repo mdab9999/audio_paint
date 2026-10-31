@@ -43,6 +43,28 @@ enum Icon {
     ZoomOutTime,
     ZoomFull,
     ZoomSelection,
+    ToolTime,
+    ToolMarquee,
+    ToolLasso,
+    ToolBrush,
+    ToolHeal,
+    ToolHand,
+    SelectAll,
+    Deselect,
+    Cut,
+    Copy,
+    Paste,
+}
+
+fn tool_icon(tool: Tool) -> Icon {
+    match tool {
+        Tool::Time => Icon::ToolTime,
+        Tool::Marquee => Icon::ToolMarquee,
+        Tool::Lasso => Icon::ToolLasso,
+        Tool::Brush => Icon::ToolBrush,
+        Tool::Heal => Icon::ToolHeal,
+        Tool::Hand => Icon::ToolHand,
+    }
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: Icon, hint: &str, enabled: bool, on: bool) -> Response {
@@ -167,6 +189,109 @@ fn draw_icon(p: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
             let m = magnifier(None);
             p.rect_filled(Rect::from_center_size(m, vec2(4.0, 4.0)), 0.0, color);
         }
+        Icon::ToolTime => {
+            // I-beam
+            p.vline(c.x, c.y - 7.0..=c.y + 7.0, stroke);
+            p.hline(c.x - 3.5..=c.x + 3.5, c.y - 7.0, stroke);
+            p.hline(c.x - 3.5..=c.x + 3.5, c.y + 7.0, stroke);
+        }
+        Icon::ToolMarquee | Icon::SelectAll | Icon::Deselect => {
+            let r = Rect::from_center_size(c, vec2(16.0, 12.0));
+            if matches!(icon, Icon::SelectAll) {
+                p.rect_filled(r, 0.0, color.gamma_multiply(0.35));
+            }
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            p.extend(egui::Shape::dashed_line(
+                &corners,
+                Stroke::new(1.2, color),
+                2.5,
+                2.0,
+            ));
+            if matches!(icon, Icon::Deselect) {
+                let s = Stroke::new(1.6, color);
+                p.line_segment([pos2(c.x - 3.5, c.y - 3.5), pos2(c.x + 3.5, c.y + 3.5)], s);
+                p.line_segment([pos2(c.x + 3.5, c.y - 3.5), pos2(c.x - 3.5, c.y + 3.5)], s);
+            }
+        }
+        Icon::ToolLasso => {
+            let loop_points: Vec<egui::Pos2> = (0..=24)
+                .map(|i| {
+                    let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                    pos2(c.x + 7.0 * a.cos(), c.y - 2.0 + 4.5 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(loop_points, stroke));
+            p.add(egui::Shape::line(
+                vec![
+                    pos2(c.x - 4.0, c.y + 2.0),
+                    pos2(c.x - 5.0, c.y + 5.0),
+                    pos2(c.x - 2.5, c.y + 7.0),
+                ],
+                stroke,
+            ));
+        }
+        Icon::ToolBrush | Icon::ToolHeal => {
+            p.line_segment(
+                [pos2(c.x + 7.0, c.y - 7.0), pos2(c.x - 0.5, c.y + 0.5)],
+                Stroke::new(2.4, color),
+            );
+            p.add(tri([(-1.5, -1.5), (1.5, 1.5), (-6.5, 6.5)]));
+            p.circle_filled(pos2(c.x - 1.8, c.y + 1.8), 2.4, color);
+            if matches!(icon, Icon::ToolHeal) {
+                // small "+" for healing
+                let s = Stroke::new(1.6, color);
+                p.line_segment([pos2(c.x - 8.0, c.y - 5.0), pos2(c.x - 2.0, c.y - 5.0)], s);
+                p.line_segment([pos2(c.x - 5.0, c.y - 8.0), pos2(c.x - 5.0, c.y - 2.0)], s);
+            }
+        }
+        Icon::ToolHand => {
+            let palm = Rect::from_min_max(pos2(c.x - 5.0, c.y - 1.0), pos2(c.x + 5.0, c.y + 7.0));
+            p.rect_filled(palm, 3.0, color);
+            for (i, top) in [-6.0, -8.0, -8.0, -6.5].iter().enumerate() {
+                let x = c.x - 4.0 + i as f32 * 2.7;
+                p.line_segment(
+                    [pos2(x, c.y + 1.0), pos2(x, c.y + top)],
+                    Stroke::new(1.8, color),
+                );
+            }
+            p.line_segment(
+                [pos2(c.x - 4.5, c.y + 3.0), pos2(c.x - 8.0, c.y - 1.0)],
+                Stroke::new(1.8, color),
+            );
+        }
+        Icon::Cut => {
+            let s = Stroke::new(1.4, color);
+            p.circle_stroke(pos2(c.x - 4.0, c.y + 4.5), 2.6, s);
+            p.circle_stroke(pos2(c.x + 4.0, c.y + 4.5), 2.6, s);
+            p.line_segment([pos2(c.x - 2.2, c.y + 2.5), pos2(c.x + 4.0, c.y - 7.5)], s);
+            p.line_segment([pos2(c.x + 2.2, c.y + 2.5), pos2(c.x - 4.0, c.y - 7.5)], s);
+        }
+        Icon::Copy => {
+            let s = Stroke::new(1.4, color);
+            let back = Rect::from_min_size(pos2(c.x - 6.5, c.y - 7.0), vec2(9.0, 11.0));
+            let front = back.translate(vec2(4.0, 3.5));
+            p.rect_stroke(back, 1.0, s, egui::StrokeKind::Middle);
+            p.rect_filled(front, 1.0, Color32::from_gray(48));
+            p.rect_stroke(front, 1.0, s, egui::StrokeKind::Middle);
+        }
+        Icon::Paste => {
+            let s = Stroke::new(1.4, color);
+            let board = Rect::from_center_size(pos2(c.x, c.y + 1.0), vec2(12.0, 14.0));
+            p.rect_stroke(board, 1.5, s, egui::StrokeKind::Middle);
+            p.rect_filled(
+                Rect::from_center_size(pos2(c.x, board.top()), vec2(6.0, 3.5)),
+                1.0,
+                color,
+            );
+            p.hline(c.x - 3.5..=c.x + 3.5, c.y + 1.0, s);
+            p.hline(c.x - 3.5..=c.x + 3.5, c.y + 4.5, s);
+        }
     }
 }
 
@@ -211,106 +336,7 @@ impl AudioPaintApp {
             });
 
             ui.menu_button("Edit", |ui| {
-                let undo_label = match self.history.can_undo() {
-                    true => format!("Undo {}", self.history.entries[self.history.pos].0),
-                    false => "Undo".into(),
-                };
-                if ui
-                    .add_enabled(
-                        self.history.can_undo() && idle,
-                        egui::Button::new(undo_label).shortcut_text("Ctrl+Z"),
-                    )
-                    .clicked()
-                {
-                    self.undo(&ctx);
-                }
-                let redo_label = match self.history.can_redo() {
-                    true => format!("Redo {}", self.history.entries[self.history.pos + 1].0),
-                    false => "Redo".into(),
-                };
-                if ui
-                    .add_enabled(
-                        self.history.can_redo() && idle,
-                        egui::Button::new(redo_label).shortcut_text("Ctrl+Y"),
-                    )
-                    .clicked()
-                {
-                    self.redo(&ctx);
-                }
-                ui.separator();
-                let can_copy = self.time_range().is_some();
-                let can_paste = has_audio && self.clipboard.is_some() && idle;
-                if ui
-                    .add_enabled(
-                        self.selection.is_some() && idle,
-                        egui::Button::new("Cut").shortcut_text("Ctrl+X"),
-                    )
-                    .on_hover_text("Copy the selected time range and remove it from the file")
-                    .clicked()
-                {
-                    self.cut(&ctx);
-                }
-                if ui
-                    .add_enabled(can_copy, egui::Button::new("Copy").shortcut_text("Ctrl+C"))
-                    .clicked()
-                {
-                    self.copy(&ctx);
-                }
-                if ui
-                    .add_enabled(
-                        can_paste,
-                        egui::Button::new("Paste").shortcut_text("Ctrl+V"),
-                    )
-                    .clicked()
-                {
-                    self.paste(&ctx, PasteMode::Insert);
-                }
-                if ui
-                    .add_enabled(
-                        can_paste,
-                        egui::Button::new("Overwrite Paste").shortcut_text("Ctrl+Shift+V"),
-                    )
-                    .clicked()
-                {
-                    self.paste(&ctx, PasteMode::Overwrite);
-                }
-                if ui
-                    .add_enabled(
-                        self.has_selection() && idle,
-                        egui::Button::new("Delete (Silence)").shortcut_text("Del"),
-                    )
-                    .clicked()
-                {
-                    self.edit_selection(&ctx, EditOp::Gain(0.0));
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        has_audio,
-                        egui::Button::new("Select All").shortcut_text("Ctrl+A"),
-                    )
-                    .clicked()
-                {
-                    self.select_all();
-                }
-                if ui
-                    .add_enabled(
-                        self.has_selection(),
-                        egui::Button::new("Deselect All").shortcut_text("Esc"),
-                    )
-                    .clicked()
-                {
-                    self.deselect();
-                }
-                ui.separator();
-                ui.menu_button("Tools", |ui| {
-                    for tool in Tool::ALL {
-                        let text = format!("{} ({:?})", tool.label(), tool.key());
-                        if ui.radio(self.tool == tool, text).clicked() {
-                            self.tool = tool;
-                        }
-                    }
-                });
+                self.edit_items(ui, &ctx, true);
             });
 
             ui.menu_button("Effects", |ui| {
@@ -318,8 +344,13 @@ impl AudioPaintApp {
             });
 
             ui.menu_button("View", |ui| {
+                let shown = (self.show_waveform, self.show_spectral);
                 ui.checkbox(&mut self.show_waveform, "Show Waveform");
                 ui.checkbox(&mut self.show_spectral, "Show Spectral Frequency Display");
+                if !self.show_waveform && !self.show_spectral {
+                    // One of the two displays always stays visible.
+                    (self.show_waveform, self.show_spectral) = shown;
+                }
                 let was_log = self.log_scale;
                 ui.checkbox(&mut self.log_scale, "Logarithmic Frequency Scale");
                 if was_log != self.log_scale {
@@ -382,6 +413,136 @@ impl AudioPaintApp {
         });
     }
 
+    /// Entries of the Edit menu, also used by the editor's right-click menu.
+    fn edit_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, with_tools: bool) {
+        let has_audio = self.loaded.is_some();
+        let idle = !self.busy();
+        let undo_label = match self.history.can_undo() {
+            true => format!("Undo {}", self.history.entries[self.history.pos].0),
+            false => "Undo".into(),
+        };
+        if ui
+            .add_enabled(
+                self.history.can_undo() && idle,
+                egui::Button::new(undo_label).shortcut_text("Ctrl+Z"),
+            )
+            .clicked()
+        {
+            self.undo(ctx);
+        }
+        let redo_label = match self.history.can_redo() {
+            true => format!("Redo {}", self.history.entries[self.history.pos + 1].0),
+            false => "Redo".into(),
+        };
+        if ui
+            .add_enabled(
+                self.history.can_redo() && idle,
+                egui::Button::new(redo_label).shortcut_text("Ctrl+Y"),
+            )
+            .clicked()
+        {
+            self.redo(ctx);
+        }
+        ui.separator();
+        let can_copy = self.time_range().is_some();
+        let can_paste = has_audio && self.clipboard.is_some() && idle;
+        if ui
+            .add_enabled(
+                self.selection.is_some() && idle,
+                egui::Button::new("Cut").shortcut_text("Ctrl+X"),
+            )
+            .on_hover_text("Copy the selected time range and remove it from the file")
+            .clicked()
+        {
+            self.cut(ctx);
+        }
+        if ui
+            .add_enabled(can_copy, egui::Button::new("Copy").shortcut_text("Ctrl+C"))
+            .clicked()
+        {
+            self.copy(ctx);
+        }
+        if ui
+            .add_enabled(
+                can_paste,
+                egui::Button::new("Paste").shortcut_text("Ctrl+V"),
+            )
+            .clicked()
+        {
+            self.paste(ctx, PasteMode::Insert);
+        }
+        if ui
+            .add_enabled(
+                can_paste,
+                egui::Button::new("Overwrite Paste").shortcut_text("Ctrl+Shift+V"),
+            )
+            .clicked()
+        {
+            self.paste(ctx, PasteMode::Overwrite);
+        }
+        if ui
+            .add_enabled(
+                self.has_selection() && idle,
+                egui::Button::new("Delete (Silence)").shortcut_text("Del"),
+            )
+            .clicked()
+        {
+            self.edit_selection(ctx, EditOp::Gain(0.0));
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                has_audio,
+                egui::Button::new("Select All").shortcut_text("Ctrl+A"),
+            )
+            .clicked()
+        {
+            self.select_all();
+        }
+        if ui
+            .add_enabled(
+                self.has_selection(),
+                egui::Button::new("Deselect All").shortcut_text("Esc"),
+            )
+            .clicked()
+        {
+            self.deselect();
+        }
+        if !with_tools {
+            return;
+        }
+        ui.separator();
+        ui.menu_button("Tools", |ui| {
+            for tool in Tool::ALL {
+                let text = format!("{} ({:?})", tool.label(), tool.key());
+                if ui.radio(self.tool == tool, text).clicked() {
+                    self.tool = tool;
+                }
+            }
+        });
+    }
+
+    /// Right-click menu of the waveform and the spectral display.
+    pub(super) fn editor_context_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let enabled = self.loaded.is_some() && !self.busy();
+        self.edit_items(ui, &ctx, false);
+        ui.separator();
+        ui.menu_button("Effects", |ui| {
+            ui.add_enabled_ui(enabled, |ui| self.effect_items(ui, &ctx));
+        });
+        ui.separator();
+        if ui.button("Zoom to Selection").clicked() {
+            self.zoom_to_selection();
+        }
+        if ui
+            .add(egui::Button::new("Zoom Out Full").shortcut_text("F"))
+            .clicked()
+        {
+            self.zoom_full();
+        }
+    }
+
     /// Entries shared by the Effects menu and the Effects panel.
     fn effect_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if ui.button("Amplify...").clicked() {
@@ -420,36 +581,69 @@ impl AudioPaintApp {
                 .on_hover_text("Waveform editor workspace");
             ui.separator();
             for tool in Tool::ALL {
-                let text = format!("{} ({:?})", tool.label(), tool.key());
-                if ui
-                    .selectable_label(self.tool == tool, text)
-                    .on_hover_text(tool.hint())
-                    .clicked()
+                if icon_button(ui, tool_icon(tool), tool.hint(), true, self.tool == tool).clicked()
                 {
                     self.tool = tool;
                 }
             }
-            if self.tool.uses_brush() {
-                ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut self.brush_radius, 2.0..=80.0)
-                        .text("Size")
-                        .integer(),
-                )
-                .on_hover_text("Brush size ([ and ])");
+            ui.separator();
+            ui.label(RichText::new("Brush").color(theme::TEXT_DIM));
+            ui.add(egui::Slider::new(&mut self.brush_radius, 2.0..=80.0).integer())
+                .on_hover_text("Size of the Paintbrush and Spot Healing brushes ([ and ])");
+            ui.separator();
+
+            let ctx = ui.ctx().clone();
+            let has_audio = self.loaded.is_some();
+            let idle = !self.busy();
+            if icon_button(ui, Icon::SelectAll, "Select All (Ctrl+A)", has_audio, false).clicked() {
+                self.select_all();
+            }
+            if icon_button(
+                ui,
+                Icon::Deselect,
+                "Deselect All (Esc)",
+                self.has_selection(),
+                false,
+            )
+            .clicked()
+            {
+                self.deselect();
+            }
+            let can_cut = self.selection.is_some() && idle;
+            if icon_button(ui, Icon::Cut, "Cut (Ctrl+X)", can_cut, false).clicked() {
+                self.cut(&ctx);
+            }
+            let can_copy = self.time_range().is_some();
+            if icon_button(ui, Icon::Copy, "Copy (Ctrl+C)", can_copy, false).clicked() {
+                self.copy(&ctx);
+            }
+            let can_paste = has_audio && self.clipboard.is_some() && idle;
+            if icon_button(
+                ui,
+                Icon::Paste,
+                "Paste at the playhead (Ctrl+V)",
+                can_paste,
+                false,
+            )
+            .clicked()
+            {
+                self.paste(&ctx, PasteMode::Insert);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // One of the two displays always stays visible.
                 if ui
                     .selectable_label(self.show_spectral, "Spectral")
-                    .on_hover_text("Show the spectral frequency display")
+                    .on_hover_text("Show the spectral frequency display (one display stays on)")
                     .clicked()
+                    && (!self.show_spectral || self.show_waveform)
                 {
                     self.show_spectral = !self.show_spectral;
                 }
                 if ui
                     .selectable_label(self.show_waveform, "Waveform")
-                    .on_hover_text("Show the waveform")
+                    .on_hover_text("Show the waveform (one display stays on)")
                     .clicked()
+                    && (!self.show_waveform || self.show_spectral)
                 {
                     self.show_waveform = !self.show_waveform;
                 }
@@ -833,10 +1027,9 @@ impl AudioPaintApp {
                 let changed_a = time_field(ui, &mut a, speed, enabled);
                 let changed_b = time_field(ui, &mut b, speed, enabled);
                 let changed_d = time_field(ui, &mut d, speed, enabled);
-                if changed_a {
-                    let span = self.view.t_span();
+                // Like End, Start moves only its own edge of the view.
+                if changed_a && a < self.view.t1 {
                     self.view.t0 = a;
-                    self.view.t1 = a + span;
                 }
                 if changed_b && b > self.view.t0 {
                     self.view.t1 = b;

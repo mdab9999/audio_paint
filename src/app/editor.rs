@@ -180,6 +180,10 @@ impl AudioPaintApp {
             self.handle_lane(ui, resp, rect, false, duration, nyq, &spec);
         }
         self.handle_navigator(ui, &nav_resp, navigator, duration);
+        // Right-click menu (a right-drag still draws a zoom box).
+        for resp in [&wave_resp, &spec_resp].into_iter().flatten() {
+            resp.context_menu(|ui| self.editor_context_menu(ui));
+        }
 
         let play_pos = self.player.position();
         if let Some(p) = play_pos

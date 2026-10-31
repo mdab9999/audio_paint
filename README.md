@@ -15,8 +15,11 @@ Built with [egui/eframe](https://github.com/emilk/egui) for the UI,
 The window follows the layout of Adobe Audition's Waveform editor:
 
 - **Menu bar**: File, Edit, Effects, View, Window, Help
-- **Tool bar**: Time Selection, Marquee, Lasso, Paintbrush, Spot Healing and Hand tools, and
-  toggles for the waveform and the spectral frequency display
+- **Tool bar**: icon buttons for the Time Selection, Marquee, Lasso, Paintbrush, Spot Healing
+  and Hand tools, the brush size, icon buttons for Select All, Deselect, Cut, Copy and Paste,
+  and toggles for the waveform and the spectral frequency display (one always stays on)
+- **Right-click menu** on the waveform and the spectral display with the Edit commands, the
+  effects and zoom
 - **Files** panel with all open files, and **History** / **Effects** panels below it
 - **Editor**: zoom navigator, one waveform lane per channel with a dB ruler, the spectral
   frequency display with a Hz ruler, the time ruler and the red current-time indicator
